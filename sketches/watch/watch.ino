@@ -1,9 +1,10 @@
 // Analog watch face with a smoothly sweeping second hand, on swd::Engine.
 //
 // Everything is vector: the dial (ticks, batons, ring) is drawn once from
-// shapes into a cached ImageLayer, plus the date in an anti-aliased font;
-// the hands are live ShapeLayer shapes evaluated every frame. Only the
-// hands' old and new areas are redrawn each refresh.
+// shapes into a cached ImageLayer, plus the date in an anti-aliased font.
+// The hands are paths (leaf-shaped Bezier outlines, a stroked lollipop ring)
+// defined once pointing up and rotated by a transform every frame. Only
+// the hands' old and new areas are redrawn each refresh.
 //
 // Time: the RTC (RX8130) counts whole seconds in UTC (as the init() badge
 // installer sets it), so at boot we wait for its next tick and start the
@@ -15,7 +16,7 @@
 // KEY A toggles the stats pill (fps and tear count).
 #include <M5Unified.h>
 #include <Layers.h>
-#include <Vector.h>
+#include <Path.h>
 #include <Preferences.h>
 #include <sys/time.h>
 
@@ -138,19 +139,45 @@ static void drawDial(const tm &date) {
   shownDay = date.tm_mday;
 }
 
-// ---- Hands
+// ---- Hands: paths defined once, pointing up from the pivot at (0, 0), and
+// rotated into place with a transform every frame.
 
-class Hands : public swd::ShapeLayer {
+struct HandPaths {
+  swd::Path hour, minute, second, ring, spine;
+  HandPaths() {
+    // Leaf-shaped (dauphine) hour and minute hands from cubic curves.
+    hour.moveTo(0, 22).cubicTo(7, 14, 9, -38, 0, -122).cubicTo(-9, -38, -7, 14, 0, 22).close();
+    minute.moveTo(0, 28).cubicTo(5.5f, 18, 7, -60, 0, -198).cubicTo(-7, -60, -5.5f, 18, 0, 28).close();
+    // Second hand: needle plus counterweight, one fill (nonzero winding).
+    second.rect(-1.2f, -206, 2.4f, 252).circle(0, 32, 6.5f);
+    ring.circle(0, -160, 7);              // lollipop near the tip (stroked)
+    spine.moveTo(0, -12).lineTo(0, -96);  // a thin line down the hour hand
+  }
+};
+static HandPaths paths;
+
+class Hands {
  public:
-  enum { kHourShadow, kMinuteShadow, kSecondShadow, kHour, kMinute, kSecond, kWeight, kCap, kPin, kCount };
-
-  void begin() {
-    for (int i = 0; i < kCount; i++) add(Shape());
+  void begin(swd::VectorLayer &layer) {
+    for (swd::PathItem *shadow : {&hourShadow_, &minuteShadow_, &secondShadow_}) shadow->setFill(kShadow, 80);
+    hourShadow_.setPath(paths.hour), minuteShadow_.setPath(paths.minute), secondShadow_.setPath(paths.second);
+    hour_.setPath(paths.hour), minute_.setPath(paths.minute), second_.setPath(paths.second);
+    hour_.setFill(kWhite), minute_.setFill(kWhite), second_.setFill(kAccent);
+    hourSpine_.setPath(paths.spine);
+    hourSpine_.noFill();
+    hourSpine_.setStroke(1.6f, 0x9AA3B5);
+    ring_.setPath(paths.ring);
+    ring_.noFill();
+    ring_.setStroke(2.6f, kAccent);
+    cap_.set(Shape::circle(kCX, kCY, 9, kAccent));
+    pin_.set(Shape::circle(kCX, kCY, 3, kDialInner));
+    for (swd::VectorItem *it : std::initializer_list<swd::VectorItem *>{
+             &hourShadow_, &minuteShadow_, &secondShadow_, &hour_, &hourSpine_, &minute_, &second_, &ring_, &cap_, &pin_}) {
+      layer.add(*it);
+    }
   }
 
-  bool animating() const override { return true; }
-
-  void update(const swd::FrameInfo &) override {
+  void update() {
     tm t;
     double s = now(t);
     if (t.tm_mday != shownDay) drawDial(t);
@@ -160,27 +187,30 @@ class Hands : public swd::ShapeLayer {
     float hour = roundf(fmod(s / 3600, 12) * 30 * 40) / 40;
     float minute = roundf(fmod(s / 60, 60) * 6 * 40) / 40;
     float second = fmod(s, 60) * 6;
-    hand(kHour, kHourShadow, hour, -18, 122, 6.5f, kWhite, 80);
-    hand(kMinute, kMinuteShadow, minute, -24, 194, 4.5f, kWhite, 80);
-    hand(kSecond, kSecondShadow, second, -46, 206, 1.6f, kAccent, 60);
-    float wx, wy;
-    polar(second, -32, wx, wy);
-    set(kWeight, Shape::circle(wx, wy, 6.5f, kAccent));
-    set(kCap, Shape::circle(kCX, kCY, 9, kAccent));
-    set(kPin, Shape::circle(kCX, kCY, 3, kDialInner));
+    place(hour, {&hour_, &hourSpine_}, hourShadow_);
+    place(minute, {&minute_}, minuteShadow_);
+    place(second, {&second_, &ring_}, secondShadow_);
   }
 
  private:
-  // A hand from `tail` (behind the center) to `tip`, with a drop shadow.
-  void hand(int i, int shadow, float deg, float tail, float tip, float radius, uint32_t color, uint8_t shadowAlpha) {
-    float ax, ay, bx, by;
-    polar(deg, tail, ax, ay);
-    polar(deg, tip, bx, by);
-    set(shadow, Shape::capsule(ax + 4, ay + 6, bx + 4, by + 6, radius + 0.5f, kShadow, shadowAlpha));
-    set(i, Shape::capsule(ax, ay, bx, by, radius, color));
+  static void place(float deg, std::initializer_list<swd::PathItem *> items, swd::PathItem &shadow) {
+    swd::Transform r = swd::Transform::rotate(deg);
+    for (swd::PathItem *it : items) it->setTransform(r.then(swd::Transform::translate(kCX, kCY)));
+    shadow.setTransform(r.then(swd::Transform::translate(kCX + 4, kCY + 6)));
   }
+
+  swd::PathItem hourShadow_, minuteShadow_, secondShadow_, hour_, hourSpine_, minute_, second_, ring_;
+  swd::ShapeItem cap_, pin_;
 };
 static Hands hands;
+
+// The vector layer that holds the hands; it animates (the second hand sweeps).
+class HandsLayer : public swd::VectorLayer {
+ public:
+  bool animating() const override { return true; }
+  void update(const swd::FrameInfo &) override { hands.update(); }
+};
+static HandsLayer handsLayer;
 
 static void onEvent(const swd::Event &e) {
   if (e.type == swd::Event::ButtonDown && e.button == swd::Event::A) stats.setVisible(!stats.visible());
@@ -197,11 +227,11 @@ void setup() {
 
   if (!engine.begin()) Serial.println("error: engine init failed");
   if (!dial.begin()) Serial.println("error: dial allocation failed");
-  hands.begin();
+  hands.begin(handsLayer);
   stats.begin(60);
   stats.setVisible(false);
   engine.add(dial);
-  engine.add(hands);
+  engine.add(handsLayer);
   engine.add(stats);
   engine.onEvent(onEvent);
   tm t;
