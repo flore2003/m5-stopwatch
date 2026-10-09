@@ -7,7 +7,10 @@ Read README.md first: it has flashing/restore commands and the measured display 
 - Upload: `arduino-cli upload -b m5stack:esp32:m5stack_stopwatch -p /dev/cu.usbmodem2101 sketches/<name>`
 - Keep the default partition scheme so the init() profile storage survives uploads.
 - Use `lib/StopWatchDisplay` (`swd::`) for anything animated: TE vsync on GPIO38, frame
-  pacing, two-core SRAM strip rendering. Full-screen updates max out at 30 fps; small
-  regions can run at 60. Don't push full frames from PSRAM (tears).
+  pacing, two-core SRAM strip rendering that chases the panel scan (tear-free by default).
+  Full-screen updates max out at 30 fps; small patches in between give 60 fps motion
+  (see `sketches/ball`). Don't push full frames from PSRAM (tears).
+- The scan model (row r at TE + 2.95 ms + r x 29.7 us) is in README "Display timing";
+  don't guess display timing, measure it.
 - Verify on the device: read serial output (115200) for timings; the user judges tearing visually.
 - Board reference: `archive/workos/SKILL.md`, `archive/m5stack/` (local only, gitignored).

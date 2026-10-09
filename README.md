@@ -58,17 +58,34 @@ user. `sketches/tap_color` and `sketches/push_bench` predate it and are standalo
 Display gotcha (from ESPtember): right after `M5.begin()`, set the panel to 468×466 with
 `offset_x = 6`, rotation 0, and never draw rows 466–467, or a black bar appears.
 
-Tearing: the panel TE signal is on GPIO38 (60 Hz, M5GFX enables it but never reads it).
-For tear-free full-screen changes, wait for the TE rising edge, then write top to bottom
-fast enough that the scan never overtakes the write. A streamed `fillScreen` (~24 ms) is clean; a full-frame sprite push
-from PSRAM (~31 ms) tears regardless of sync or write direction. See `sketches/tap_color`.
+## Display timing (measured)
 
-Full-screen animation (`sketches/anim_bg`): render into two 32-row SRAM strips on the second
-core while the main core pushes them, start each frame on a TE edge, present every second
-refresh. Measured: ~22 ms bus-only, ~23.6 ms with the gradient, steady 30 fps; 60 fps is
-out of reach for full-screen updates. Sending only the visible circle (84% of pixels) saves
-~2.7 ms. Keep render callbacks lean: the sending core waits on the renderer at the start of
-each frame (check `lastStats().waitRender`); clamping per pixel and 16-bit stores cost the
-gradient ~7 ms per frame.
-M5GFX quirks: `pushImageDMA` returns before the transfer is done and `waitDMA()` does not
-wait for it; the time only shows up in `endWrite()`.
+The CO5300 refreshes at 59.68 Hz (16.76 ms) and pulses its tearing-effect (TE) pin, GPIO38,
+once per refresh. M5GFX enables TE but never reads it. After the TE edge the panel blanks
+for ~2.95 ms, then scans rows top to bottom at ~29.7 µs per row (13.8 ms for 466 rows):
+**row r is scanned at TE + 2.95 ms + r × 29.7 µs.** Period and row time come from
+`sketches/scan_probe` (moves the TE line with command `0x44`); the blanking was tuned by
+eye with `sketches/ball`.
+
+**Tear-free rule:** write each row after the scan has passed it and before it comes round
+again. Everything written in one pass then appears together, exactly one refresh later.
+`swd::StripRenderer` does this by default (`followScan`): each strip waits until the scan
+has passed it.
+
+Bus speed: a full 468×466 RGB565 frame takes ~22–24 ms over QSPI, so full-screen updates
+top out at 30 fps; ~30 ms per frame is the limit before the next scan overtakes the write
+(a full-frame sprite push from PSRAM, ~31 ms, always tears). Sending only the visible circle
+(84% of pixels) saves ~2.7 ms. Render callbacks must keep up: the sending core waits on the
+renderer at the start of each frame (`lastStats().waitRender`).
+
+What runs where:
+- `sketches/anim_bg`: full-screen animated gradient, 30 fps.
+- `sketches/ball`: ball at 60 fps over the 30 fps gradient. Full frame every second
+  refresh, plus a small patch of the ball's old and new position in between, both chasing
+  the scan. Dead ends: alternating screen halves (one half shows a refresh late, so the ball
+  tears where they meet) and patching without the 2.95 ms blanking (patches land a refresh
+  early: 30 fps look plus tearing).
+
+M5GFX quirks: `pushImageDMA` returns before the transfer is done and `waitDMA()` doesn't
+wait for it; the time only shows up in `endWrite()`. `Panel_AMOLED::command_list()` sends
+raw panel commands (include `lgfx/v1/panel/Panel_AMOLED.hpp`).

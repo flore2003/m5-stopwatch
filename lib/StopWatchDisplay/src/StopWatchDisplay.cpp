@@ -19,7 +19,11 @@ void setupDisplay(uint8_t brightness) {
 // ---- Vsync
 
 static volatile uint32_t teCount = 0;
-static void IRAM_ATTR onTE() { teCount = teCount + 1; }
+static volatile uint32_t teEdgeUs = 0;
+static void IRAM_ATTR onTE() {
+  teEdgeUs = micros();
+  teCount = teCount + 1;
+}
 
 void Vsync::begin(int pin) {
   pinMode(pin, INPUT);
@@ -27,6 +31,14 @@ void Vsync::begin(int pin) {
 }
 
 uint32_t Vsync::count() { return teCount; }
+
+uint32_t Vsync::lastEdgeUs() { return teEdgeUs; }
+
+void Vsync::waitAfterEdge(uint32_t us) {
+  uint32_t edge = teEdgeUs;
+  while (micros() - edge < us) {
+  }
+}
 
 bool Vsync::waitFor(uint32_t target, uint32_t timeoutUs) {
   uint32_t t0 = micros();
@@ -110,36 +122,56 @@ bool StripRenderer::span(int x, int y, int w, int rows, int &sx, int &sw) const 
 }
 
 uint32_t StripRenderer::drawRect(int x, int y, int w, int h) {
-  uint32_t t0 = micros();
-  int yEnd = min(kHeight, y + h);
-  y = max(0, y);
-  if (!fn_ || y >= yEnd || w <= 0) return 0;
-  caller_ = xTaskGetCurrentTaskHandle();
+  Region r = {x, y, w, h};
+  return drawRegions(&r, 1);
+}
 
-  // Collect the bands first so the render core can always be one ahead.
-  constexpr int kMaxBands = 64;
-  Job bands[kMaxBands];
-  int n = 0;
-  for (int by = y; by < yEnd && n < kMaxBands; by += cfg_.stripRows) {
-    int rows = min(cfg_.stripRows, yEnd - by), sx, sw;
-    if (span(x, by, w, rows, sx, sw)) bands[n++] = {nullptr, int16_t(sx), int16_t(by), int16_t(sw), int16_t(rows)};
-  }
+uint32_t StripRenderer::drawRegions(const Region *regions, int count) {
+  uint32_t t0 = micros();
   stats_ = {};
   renderUs_ = 0;
+  if (!fn_) return 0;
+  caller_ = xTaskGetCurrentTaskHandle();
+
+  // Cut every region into bands on a shared grid of stripRows, then order the
+  // pieces by band, so the whole update is written top to bottom.
+  int yMin = kHeight, yMax = 0;
+  for (int i = 0; i < count; i++) {
+    yMin = min(yMin, max(0, regions[i].y));
+    yMax = max(yMax, min(kHeight, regions[i].y + regions[i].h));
+  }
+  constexpr int kMaxJobs = 128;
+  Job jobs[kMaxJobs];
+  int n = 0;
+  for (int by = yMin - yMin % cfg_.stripRows; by < yMax; by += cfg_.stripRows) {
+    for (int i = 0; i < count && n < kMaxJobs; i++) {
+      const Region &r = regions[i];
+      int y0 = max(by, max(0, r.y)), y1 = min(by + cfg_.stripRows, min(kHeight, r.y + r.h)), sx, sw;
+      if (y0 >= y1 || r.w <= 0) continue;
+      if (span(r.x, y0, r.w, y1 - y0, sx, sw)) jobs[n++] = {nullptr, int16_t(sx), int16_t(y0), int16_t(sw), int16_t(y1 - y0)};
+    }
+  }
   if (n == 0) return stats_.total = micros() - t0;
+  const uint32_t edge = Vsync::lastEdgeUs();
 
   M5.Display.startWrite();
-  bands[0].dst = buf_[0];
-  runJob(bands[0]);
+  jobs[0].dst = buf_[0];
+  runJob(jobs[0]);
   uint32_t w0 = micros();
   ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   stats_.waitRender += micros() - w0;
   for (int i = 0; i < n; i++) {
     if (i + 1 < n) {
-      bands[i + 1].dst = buf_[(i + 1) & 1];
-      runJob(bands[i + 1]);  // renders into the other buffer
+      jobs[i + 1].dst = buf_[(i + 1) & 1];
+      runJob(jobs[i + 1]);  // renders into the other buffer
     }
-    const Job &b = bands[i];
+    const Job &b = jobs[i];
+    if (cfg_.followScan) {
+      uint32_t passed = scanTimeUs(b.y + b.rows) + cfg_.scanMarginUs, s0 = micros();
+      while (micros() - edge < passed) {
+      }
+      stats_.waitScan += micros() - s0;
+    }
     // Returns once the transfer is queued; the next setWindow waits for it.
     M5.Display.pushImageDMA(b.x, b.y, b.w, b.rows, reinterpret_cast<const lgfx::swap565_t *>(b.dst));
     M5.Display.waitDMA();
