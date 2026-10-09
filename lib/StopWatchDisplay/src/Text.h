@@ -15,6 +15,9 @@
 // setText() only rebuilds and redraws glyphs whose character or position
 // changed (a counter going 00123 -> 00124 redraws one digit). No hinting and
 // no kerning yet.
+//
+// Codepoints U+E000 + c hold the font's tabular (equal-width) form of ASCII
+// character c, where it has one (see setTabularNumbers()).
 #pragma once
 
 #include "Path.h"
@@ -60,6 +63,9 @@ class TextItem : public VectorItem {
   void setColor(uint32_t color, uint8_t alpha = 255);
   void setAlign(Align a);
   void setBaseline(Baseline b);
+  // Equal-width digits (the font's tabular figures, if it has them), so
+  // changing numbers don't shift: use for counters and clocks.
+  void setTabularNumbers(bool on);
   // Where the anchor (aligned point on the baseline) goes; replaces the
   // transform with a translation.
   void setPosition(float x, float y) { setTransform(Transform::translate(x, y)); }
@@ -91,6 +97,7 @@ class TextItem : public VectorItem {
   uint8_t alpha_ = 255;
   Align align_ = Left;
   Baseline baseline_ = Alphabetic;
+  bool tabular_ = false;
   Transform transform_;
   float width_ = 0;  // font units
 

@@ -8,6 +8,10 @@ Usage (fontTools comes in via uv):
 Outlines keep the font's own units (y up) and curves (quadratic for TrueType),
 so text can be drawn at any size and angle by the engine's path filler. The
 character set is printable ASCII plus a few symbols (see CHARSET).
+
+Tabular alternates (OpenType 'tnum', equal-width digits) are emitted under
+private-use codepoints U+E000 + the original character, for
+TextItem::setTabularNumbers().
 """
 
 import argparse
@@ -21,6 +25,24 @@ from fontTools.varLib.instancer import instantiateVariableFont
 CHARSET = [chr(c) for c in range(32, 127)] + list("°·–—…×←↑→↓•")
 
 OP_MOVE, OP_LINE, OP_QUAD, OP_CUBIC, OP_CLOSE = 0, 1, 2, 3, 4
+TABULAR_BASE = 0xE000
+
+
+def feature_substitutions(font, tag):
+    """Single substitutions (glyph name -> glyph name) of a GSUB feature."""
+    subs = {}
+    if "GSUB" not in font:
+        return subs
+    gsub = font["GSUB"].table
+    for record in gsub.FeatureList.FeatureRecord:
+        if record.FeatureTag != tag:
+            continue
+        for index in record.Feature.LookupListIndex:
+            lookup = gsub.LookupList.Lookup[index]
+            for sub in lookup.SubTable:
+                sub = getattr(sub, "ExtSubTable", sub)
+                subs.update(getattr(sub, "mapping", None) or {})
+    return subs
 
 
 def glyph_ops(glyphset, name):
@@ -73,14 +95,21 @@ def main():
     glyphset = font.getGlyphSet()
     hmtx = font["hmtx"]
 
-    glyphs, data, missing = [], [], []
+    entries = []  # (codepoint, glyph name)
+    missing = []
     for ch in sorted(set(CHARSET), key=ord):
         name = cmap.get(ord(ch))
         if name is None:
             missing.append(ch)
-            continue
+        else:
+            entries.append((ord(ch), name))
+    tnum = feature_substitutions(font, "tnum")
+    entries += [(TABULAR_BASE + cp, tnum[name]) for cp, name in entries if cp < 0x100 and name in tnum]
+
+    glyphs, data = [], []
+    for cp, name in sorted(entries):
         ops = glyph_ops(glyphset, name)
-        glyphs.append((ord(ch), hmtx[name][0], len(data), len(ops)))
+        glyphs.append((cp, hmtx[name][0], len(data), len(ops)))
         data += ops
     if missing:
         print(f"warning: not in font: {''.join(missing)!r}", file=sys.stderr)

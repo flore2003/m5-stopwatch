@@ -24,6 +24,7 @@ class TextLayer : public swd::VectorLayer {
     counter_.setSize(72);
     counter_.setAlign(swd::TextItem::Center);
     counter_.setBaseline(swd::TextItem::Middle);
+    counter_.setTabularNumbers(true);  // equal-width digits: no jumping
     counter_.setPosition(swd::kCenterX, swd::kCenterY - 10);
 
     orbit_.setFont(swd::fonts::InterRegular);

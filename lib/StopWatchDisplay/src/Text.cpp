@@ -31,6 +31,23 @@ uint32_t nextCodepoint(const char *&p) {
 
 }  // namespace
 
+namespace {
+
+// The glyph for cp, preferring its tabular form if asked; falls back to '?'.
+const GlyphData *lookup(const FontData &f, uint32_t &cp, bool tabular) {
+  if (tabular && cp < 0x100) {
+    if (const GlyphData *g = findGlyph(f, 0xE000 + cp)) {
+      cp = 0xE000 + cp;
+      return g;
+    }
+  }
+  if (const GlyphData *g = findGlyph(f, cp)) return g;
+  cp = '?';
+  return findGlyph(f, '?');
+}
+
+}  // namespace
+
 void TextItem::change(void (TextItem::*apply)()) {
   invalidateArea();
   (this->*apply)();
@@ -74,6 +91,12 @@ void TextItem::setAlign(Align a) {
   change(&TextItem::relayout);
 }
 
+void TextItem::setTabularNumbers(bool on) {
+  if (tabular_ == on) return;
+  tabular_ = on;
+  change(&TextItem::relayout);
+}
+
 void TextItem::setBaseline(Baseline b) {
   if (baseline_ == b) return;
   baseline_ = b;
@@ -95,13 +118,11 @@ void TextItem::layout(bool force) {
     return transform();
   }
   const FontData &f = *font_;
-  const GlyphData *fallback = findGlyph(f, '?');
 
   float width = 0;
   for (const char *p = text_; *p;) {
-    const GlyphData *g = findGlyph(f, nextCodepoint(p));
-    if (!g) g = fallback;
-    if (g) width += g->advance;
+    uint32_t cp = nextCodepoint(p);
+    if (const GlyphData *g = lookup(f, cp, tabular_)) width += g->advance;
   }
   width_ = width;
   const float s = scale();
@@ -111,8 +132,7 @@ void TextItem::layout(bool force) {
   int n = 0;
   for (const char *p = text_; *p && n < kMaxGlyphs;) {
     uint32_t cp = nextCodepoint(p);
-    const GlyphData *g = findGlyph(f, cp);
-    if (!g) g = fallback, cp = '?';
+    const GlyphData *g = lookup(f, cp, tabular_);
     if (!g) continue;
     if (g->count) {
       // Same character at the same place: keep it (nothing to redraw).
