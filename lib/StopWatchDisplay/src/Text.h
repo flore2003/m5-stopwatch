@@ -54,8 +54,12 @@ class TextItem : public VectorItem {
 
   static constexpr int kMaxGlyphs = 48;
 
-  TextItem() = default;
-  TextItem(const FontData &font, float size) : font_(&font), size_(size) {}
+  // Default small-size tuning, chosen by eye on the device: gamma 2, no
+  // snapping (see setGamma()/setSnapping()).
+  static constexpr float kDefaultGamma = 2.0f;
+
+  TextItem() { setGamma(kDefaultGamma); }
+  TextItem(const FontData &font, float size) : font_(&font), size_(size) { setGamma(kDefaultGamma); }
 
   void setFont(const FontData &font);
   void setSize(float px);  // em size in pixels
@@ -68,10 +72,11 @@ class TextItem : public VectorItem {
   void setTabularNumbers(bool on);
   // Small-size quality, instead of hinting:
   // - gamma > 1 strengthens anti-aliased edges (coverage^(1/gamma)), which
-  //   keeps thin light-on-dark stems from washing out; 1 is linear.
+  //   keeps thin light-on-dark stems from washing out; 1 is linear. Default 2.
   // - snapping (unrotated text only) scales so the x-height is a whole
   //   number of pixels and puts the baseline on a pixel boundary, so
-  //   horizontal edges are crisp (like FreeType's "light" hinting).
+  //   horizontal edges are crisp (like FreeType's "light" hinting). Off by
+  //   default: on this panel the gamma alone looked better.
   void setGamma(float gamma);
   void setSnapping(bool on);
   // Where the anchor (aligned point on the baseline) goes; replaces the

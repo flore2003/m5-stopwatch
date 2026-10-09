@@ -1,7 +1,7 @@
 // Live vector text test for swd::TextItem: small-size quality comparison.
 //
-// The same words at 10-24 px in two columns: left plain, right tuned
-// (gamma on edge coverage, light vertical snapping). KEY A toggles
+// The same words at 10-24 px in two columns: left plain (gamma 1), right
+// tuned (starts at the TextItem defaults: gamma 2, no snapping). KEY A toggles
 // snapping on the right column, KEY B cycles the right column's gamma. A
 // tabular counter at the top keeps the engine drawing.
 // Serial: 'a' = KEY A, 'b' = KEY B; prints timing.
@@ -18,8 +18,8 @@ static constexpr int kRows = sizeof(kSizes) / sizeof(kSizes[0]);
 
 class TextLayer : public swd::VectorLayer {
  public:
-  int gammaIdx = 2;
-  bool snap = true;
+  int gammaIdx = 3;    // 2.0, the TextItem default
+  bool snap = false;   // the TextItem default
 
   void begin() {
     counter_.setFont(swd::fonts::InterSemiBold);
@@ -46,6 +46,7 @@ class TextLayer : public swd::VectorLayer {
         t.setAlign(side ? swd::TextItem::Left : swd::TextItem::Right);
         t.setPosition(swd::kCenterX + (side ? 12 : -12), y);
         t.setText(label);
+        if (!side) t.setGamma(1);  // left column: plain, linear coverage
         add(t);
       }
     }
