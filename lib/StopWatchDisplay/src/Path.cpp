@@ -124,6 +124,11 @@ void VectorItem::invalidateArea() {
   if (layer_ && visible_) layer_->invalidateItem(*this);
 }
 
+void VectorItem::invalidateRects(const Rect *rects, int n) {
+  if (!layer_ || !visible_) return;
+  for (int i = 0; i < n; i++) layer_->invalidateRect(rects[i]);
+}
+
 void VectorItem::setVisible(bool visible) {
   if (visible == visible_) return;
   if (visible_) invalidateArea();
@@ -172,6 +177,7 @@ void ShapeItem::set(const Shape &s) {
 void PathItem::setPath(const Path &path) {
   invalidateArea();
   path_ = &path;
+  flattenScale_ = 0;
   rebuild();
   invalidateArea();
 }
@@ -185,13 +191,16 @@ void PathItem::setTransform(const Transform &t) {
 }
 
 void PathItem::setFill(uint32_t color, uint8_t alpha) {
+  if (hasFill_ && fill_ == color && fillAlpha_ == alpha) return;
   invalidateArea();
+  bool geometry = !hasFill_;
   fill_ = color, fillAlpha_ = alpha, hasFill_ = true;
-  rebuild();
+  if (geometry) rebuild();  // a color change alone keeps the edges
   invalidateArea();
 }
 
 void PathItem::noFill() {
+  if (!hasFill_) return;
   invalidateArea();
   hasFill_ = false;
   rebuild();
@@ -200,52 +209,38 @@ void PathItem::noFill() {
 
 void PathItem::setStroke(float width, uint32_t color, uint8_t alpha) {
   invalidateArea();
+  bool geometry = !hasStroke_ || strokeHalf_ != width / 2;
   strokeHalf_ = width / 2, stroke_ = color, strokeAlpha_ = alpha, hasStroke_ = width > 0;
-  rebuild();
+  if (geometry) rebuild();
   invalidateArea();
 }
 
 void PathItem::noStroke() {
+  if (!hasStroke_) return;
   invalidateArea();
   hasStroke_ = false;
   rebuild();
   invalidateArea();
 }
 
-// Transform the path and flatten its curves into screen-space edges.
-void PathItem::rebuild() {
-  fillEdges_.clear();
-  strokeEdges_.clear();
-  bounds_ = Rect();
+// Flatten the path into local line segments, fine enough for the current
+// scale (tolerance kFlatness in screen pixels).
+void PathItem::flatten() {
+  segments_.clear();
+  flattenScale_ = max(transform_.maxScale(), 1e-3f);
   if (!path_) return;
   const auto &verbs = path_->verbs();
   const auto &pts = path_->points();
-  // Tolerance in local units, so curves are smooth after scaling.
-  const float tol = kFlatness / max(transform_.maxScale(), 1e-3f);
+  const float tol = kFlatness / flattenScale_;
 
-  float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
-  float startX = 0, startY = 0, curX = 0, curY = 0;  // local coordinates
+  float startX = 0, startY = 0, curX = 0, curY = 0;
   bool open = false;
-  auto emit = [&](float lx0, float ly0, float lx1, float ly1) {
-    float x0, y0, x1, y1;
-    transform_.apply(lx0, ly0, x0, y0);
-    transform_.apply(lx1, ly1, x1, y1);
-    minX = min(minX, min(x0, x1)), maxX = max(maxX, max(x0, x1));
-    minY = min(minY, min(y0, y1)), maxY = max(maxY, max(y0, y1));
-    if (hasStroke_) strokeEdges_.push_back({x0, y0, x1, y1, 0});
-    if (hasFill_ && y0 != y1) {
-      if (y0 < y1) fillEdges_.push_back({x0, y0, x1, y1, 1});
-      else fillEdges_.push_back({x1, y1, x0, y0, -1});
-    }
+  auto emit = [&](float x0, float y0, float x1, float y1, bool stroked) {
+    segments_.push_back({x0, y0, x1, y1, stroked});
   };
   auto closeFill = [&]() {
     // Fills are implicitly closed (as in SVG); strokes only on close().
-    if (open && hasFill_ && (curX != startX || curY != startY)) {
-      bool keepStroke = hasStroke_;
-      hasStroke_ = false;
-      emit(curX, curY, startX, startY);
-      hasStroke_ = keepStroke;
-    }
+    if (open && (curX != startX || curY != startY)) emit(curX, curY, startX, startY, false);
   };
   size_t p = 0;
   for (Path::Verb v : verbs) {
@@ -257,7 +252,7 @@ void PathItem::rebuild() {
         open = true;
         break;
       case Path::Line:
-        emit(curX, curY, pts[p], pts[p + 1]);
+        emit(curX, curY, pts[p], pts[p + 1], true);
         curX = pts[p], curY = pts[p + 1];
         p += 2;
         break;
@@ -269,7 +264,7 @@ void PathItem::rebuild() {
         for (int i = 1; i <= n; i++) {
           float t = float(i) / n, u = 1 - t;
           float nx = u * u * curX + 2 * u * t * cx + t * t * x, ny = u * u * curY + 2 * u * t * cy + t * t * y;
-          emit(px, py, nx, ny);
+          emit(px, py, nx, ny, true);
           px = nx, py = ny;
         }
         curX = x, curY = y;
@@ -287,7 +282,7 @@ void PathItem::rebuild() {
           float t = float(i) / n, u = 1 - t;
           float a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
           float nx = a * curX + b * c1x + c * c2x + d * x, ny = a * curY + b * c1y + c * c2y + d * y;
-          emit(px, py, nx, ny);
+          emit(px, py, nx, ny, true);
           px = nx, py = ny;
         }
         curX = x, curY = y;
@@ -295,13 +290,38 @@ void PathItem::rebuild() {
         break;
       }
       case Path::Close:
-        if (curX != startX || curY != startY) emit(curX, curY, startX, startY);
+        if (curX != startX || curY != startY) emit(curX, curY, startX, startY, true);
         curX = startX, curY = startY;
         open = false;
         break;
     }
   }
   closeFill();
+}
+
+// Transform the local segments into screen-space edges. Re-flattens first
+// if the scale moved far from the one the segments were made for.
+void PathItem::rebuild() {
+  fillEdges_.clear();
+  strokeEdges_.clear();
+  bounds_ = Rect();
+  if (!path_) return;
+  float scale = transform_.maxScale();
+  if (flattenScale_ == 0 || scale > flattenScale_ * 1.25f || scale < flattenScale_ * 0.5f) flatten();
+
+  float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+  for (const Segment &sg : segments_) {
+    float x0, y0, x1, y1;
+    transform_.apply(sg.x0, sg.y0, x0, y0);
+    transform_.apply(sg.x1, sg.y1, x1, y1);
+    minX = min(minX, min(x0, x1)), maxX = max(maxX, max(x0, x1));
+    minY = min(minY, min(y0, y1)), maxY = max(maxY, max(y0, y1));
+    if (hasStroke_ && sg.stroked) strokeEdges_.push_back({x0, y0, x1, y1, 0});
+    if (hasFill_ && y0 != y1) {
+      if (y0 < y1) fillEdges_.push_back({x0, y0, x1, y1, 1, (x1 - x0) / (y1 - y0)});
+      else fillEdges_.push_back({x1, y1, x0, y0, -1, (x0 - x1) / (y0 - y1)});
+    }
+  }
   std::sort(fillEdges_.begin(), fillEdges_.end(), [](const Edge &a, const Edge &b) { return a.y0 < b.y0; });
   if (minX > maxX) return;
   float m = hasStroke_ ? strokeHalf_ + 1 : 1;
@@ -348,21 +368,26 @@ namespace {
 float gAccum[kWidth + 2];
 
 // Adds one edge's signed area to the accumulator for the row band
-// [rowTop, rowTop + 1), with x already relative to the span start and the
-// accumulator width w. Coverage of a pixel is then the running sum.
-// (The method used by font-rs and stb_truetype.) Widens [lo, hi) to the
-// columns this row's piece of the edge touches.
-void accumulateEdge(float x0, float y0, float x1, float y1, int8_t dir, float rowTop, int w, int &touchLo, int &touchHi) {
+// [rowTop, rowTop + 1), with x already relative to the span start (offset
+// xOff) and the accumulator width w. Coverage of a pixel is then the running
+// sum. (The method used by font-rs and stb_truetype.) Widens [lo, hi) to the
+// columns this row's piece of the edge touches. Hot: no divisions and no
+// floorf (x is clamped to >= 0, where a cast is a floor).
+inline void accumulateEdge(float x0, float y0, float y1, float dxdy, int8_t dir, float rowTop, int w, int &touchLo,
+                           int &touchHi) {
   float top = max(y0, rowTop), bot = min(y1, rowTop + 1);
   if (bot <= top) return;
-  float dxdy = (x1 - x0) / (y1 - y0);
-  float xa = x0 + (top - y0) * dxdy, xb = x0 + (bot - y0) * dxdy;
+  float xa = x0 + (top - y0) * dxdy, xb = xa + (bot - top) * dxdy;
   float d = (bot - top) * dir;
   // Left of the span: the whole contribution lands in column 0; right of it: none.
-  xa = constrain(xa, 0.0f, float(w)), xb = constrain(xb, 0.0f, float(w));
+  const float fw = float(w);
+  xa = xa < 0 ? 0 : xa > fw ? fw : xa;
+  xb = xb < 0 ? 0 : xb > fw ? fw : xb;
   float lo = min(xa, xb), hi = max(xa, xb);
-  float loF = floorf(lo);
-  int loI = int(loF), hiI = int(ceilf(hi));
+  int loI = int(lo);
+  float loF = float(loI);
+  int hiI = int(hi);
+  if (float(hiI) < hi) hiI++;  // ceil
   touchLo = min(touchLo, loI), touchHi = max(touchHi, hiI + 1);
   if (hiI <= loI + 1) {
     // Within one pixel: split by the average x.
@@ -372,7 +397,7 @@ void accumulateEdge(float x0, float y0, float x1, float y1, int8_t dir, float ro
   } else {
     float inv = 1 / (hi - lo), lf = lo - loF;
     float a0 = 0.5f * inv * (1 - lf) * (1 - lf);
-    float hf = hi - ceilf(hi) + 1;
+    float hf = hi - float(hiI) + 1;
     float am = 0.5f * inv * hf * hf;
     gAccum[loI] += d * a0;
     if (hiI == loI + 2) {
@@ -409,7 +434,7 @@ void PathItem::renderFill(const Span &s) const {
         memset(gAccum, 0, (w + 2) * sizeof(float));
         any = true;
       }
-      accumulateEdge(e.x0 - b.x0, e.y0, e.x1 - b.x0, e.y1, e.dir, top, w, lo, hi);
+      accumulateEdge(e.x0 - b.x0, e.y0, e.y1, e.dxdy, e.dir, top, w, lo, hi);
     }
     if (!any || lo >= hi) continue;
     // Coverage is the running sum; past the rightmost touched column it's

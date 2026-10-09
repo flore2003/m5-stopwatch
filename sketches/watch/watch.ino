@@ -143,15 +143,14 @@ static void drawDial(const tm &date) {
 // rotated into place with a transform every frame.
 
 struct HandPaths {
-  swd::Path hour, minute, second, ring, spine;
+  swd::Path hour, minute, second, ring;
   HandPaths() {
     // Leaf-shaped (dauphine) hour and minute hands from cubic curves.
     hour.moveTo(0, 22).cubicTo(7, 14, 9, -38, 0, -122).cubicTo(-9, -38, -7, 14, 0, 22).close();
     minute.moveTo(0, 28).cubicTo(5.5f, 18, 7, -60, 0, -198).cubicTo(-7, -60, -5.5f, 18, 0, 28).close();
     // Second hand: needle plus counterweight, one fill (nonzero winding).
     second.rect(-1.2f, -206, 2.4f, 252).circle(0, 32, 6.5f);
-    ring.circle(0, -160, 7);              // lollipop near the tip (stroked)
-    spine.moveTo(0, -12).lineTo(0, -96);  // a thin line down the hour hand
+    ring.circle(0, -160, 7);  // lollipop near the tip (stroked)
   }
 };
 static HandPaths paths;
@@ -163,16 +162,13 @@ class Hands {
     hourShadow_.setPath(paths.hour), minuteShadow_.setPath(paths.minute), secondShadow_.setPath(paths.second);
     hour_.setPath(paths.hour), minute_.setPath(paths.minute), second_.setPath(paths.second);
     hour_.setFill(kWhite), minute_.setFill(kWhite), second_.setFill(kAccent);
-    hourSpine_.setPath(paths.spine);
-    hourSpine_.noFill();
-    hourSpine_.setStroke(1.6f, 0x9AA3B5);
     ring_.setPath(paths.ring);
     ring_.noFill();
     ring_.setStroke(2.6f, kAccent);
     cap_.set(Shape::circle(kCX, kCY, 9, kAccent));
     pin_.set(Shape::circle(kCX, kCY, 3, kDialInner));
     for (swd::VectorItem *it : std::initializer_list<swd::VectorItem *>{
-             &hourShadow_, &minuteShadow_, &secondShadow_, &hour_, &hourSpine_, &minute_, &second_, &ring_, &cap_, &pin_}) {
+             &hourShadow_, &minuteShadow_, &secondShadow_, &hour_, &minute_, &second_, &ring_, &cap_, &pin_}) {
       layer.add(*it);
     }
   }
@@ -187,7 +183,7 @@ class Hands {
     float hour = roundf(fmod(s / 3600, 12) * 30 * 40) / 40;
     float minute = roundf(fmod(s / 60, 60) * 6 * 40) / 40;
     float second = fmod(s, 60) * 6;
-    place(hour, {&hour_, &hourSpine_}, hourShadow_);
+    place(hour, {&hour_}, hourShadow_);
     place(minute, {&minute_}, minuteShadow_);
     place(second, {&second_, &ring_}, secondShadow_);
   }
@@ -199,7 +195,7 @@ class Hands {
     shadow.setTransform(r.then(swd::Transform::translate(kCX + 4, kCY + 6)));
   }
 
-  swd::PathItem hourShadow_, minuteShadow_, secondShadow_, hour_, hourSpine_, minute_, second_, ring_;
+  swd::PathItem hourShadow_, minuteShadow_, secondShadow_, hour_, minute_, second_, ring_;
   swd::ShapeItem cap_, pin_;
 };
 static Hands hands;

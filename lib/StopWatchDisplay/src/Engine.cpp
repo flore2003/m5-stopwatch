@@ -171,6 +171,7 @@ void Engine::frame() {
   pacer_.wait();
   counters_.sleptUs += micros() - s0;
 
+  const uint32_t u0 = micros();
   Event e;
   while (xQueueReceive(events_, &e, 0) == pdTRUE) dispatch(e);
 
@@ -187,6 +188,7 @@ void Engine::frame() {
   }
 
   last_ = {};
+  last_.updateUs = micros() - u0;
   if (dirty_) {
     int area = 0;
     for (const Band &b : bands_) {

@@ -156,6 +156,7 @@ class Engine {
   };
 
   struct FrameStats {
+    uint32_t updateUs;    // events + layer update()s (main core, before the draw)
     uint32_t drawUs;      // the draw (0 if nothing was dirty)
     uint16_t regions;     // regions drawn (0: nothing dirty)
     bool full;            // drawn as a full frame

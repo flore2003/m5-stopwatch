@@ -7,9 +7,10 @@
 //   layer.add(item);                      // a VectorLayer
 //   item.setTransform(swd::Transform::rotate(deg).then(swd::Transform::translate(cx, cy)));
 //
-// A PathItem transforms its path and flattens curves into line segments in
-// screen space (within kFlatness px) whenever its path or transform
-// changes. Fills use exact area coverage per pixel (the scanline method
+// A PathItem flattens its path's curves into line segments once, in local
+// coordinates (within kFlatness px at the current scale), and only re-flattens
+// when the path changes or the scale changes a lot; a new transform just
+// moves the points. Fills use exact area coverage per pixel (the scanline method
 // font renderers use), nonzero winding. Strokes use the distance to the
 // nearest segment, with round caps and joins.
 #pragma once
@@ -96,6 +97,8 @@ class VectorItem {
  protected:
   // Redraw this item's current area (call before and after a change).
   void invalidateArea();
+  // Redraw specific screen areas (for items that change only in part).
+  void invalidateRects(const Rect *rects, int n);
 
  private:
   friend class VectorLayer;
@@ -128,13 +131,22 @@ class PathItem : public VectorItem {
   struct Edge {
     float x0, y0, x1, y1;  // y0 <= y1 for fills; original order for strokes
     int8_t dir;            // +1 down, -1 up (fills)
+    float dxdy = 0;        // fills: x step per row, precomputed
   };
-  void rebuild();
+  // A flattened segment in local coordinates.
+  struct Segment {
+    float x0, y0, x1, y1;
+    bool stroked;  // false: the implicit closing edge of a fill
+  };
+  void flatten();   // path -> local segments
+  void rebuild();   // local segments + transform -> screen edges and bounds
   void renderFill(const Span &s) const;
   void renderStroke(const Span &s) const;
 
   const Path *path_ = nullptr;
   Transform transform_;
+  std::vector<Segment> segments_;
+  float flattenScale_ = 0;  // scale the segments were flattened for (0: stale)
   uint32_t fill_ = 0xFFFFFF, stroke_ = 0xFFFFFF;
   uint8_t fillAlpha_ = 255, strokeAlpha_ = 255;
   bool hasFill_ = true, hasStroke_ = false;
@@ -173,6 +185,7 @@ class VectorLayer : public Layer {
  private:
   friend class VectorItem;
   void invalidateItem(const VectorItem &item);
+  void invalidateRect(const Rect &r) { invalidate(r); }
   VectorItem *items_[kMaxItems] = {};
   int count_ = 0;
 };
