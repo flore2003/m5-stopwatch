@@ -88,6 +88,7 @@ void setup() {
   background.setTheme(swd::kGradientThemes[1]);
   ball.begin();
   stats.begin();
+  stats.setNote("bg 60");
   engine.add(background);
   engine.add(ball);
   engine.add(stats);
@@ -106,6 +107,7 @@ void loop() {
     toggleMode = false;
     interval = 3 - interval;  // 1 <-> 2
     background.setInterval(interval);
+    stats.setNote(interval == 1 ? "bg 60" : "bg 30");
   }
 
   engine.frame();

@@ -26,7 +26,7 @@ void SpriteLayer::moveTo(int x, int y) {
 // ---- StatsLayer
 
 bool StatsLayer::begin(int y) {
-  if (!SpriteLayer::begin(150, 26)) return false;
+  if (!SpriteLayer::begin(200, 26)) return false;
   moveTo((kWidth - width()) / 2, y);
   redraw(0);
   return true;
@@ -34,6 +34,10 @@ bool StatsLayer::begin(int y) {
 
 void StatsLayer::update(const FrameInfo &f) {
   windowFrames_++;
+  if (noteChanged_) {
+    noteChanged_ = false;
+    redraw(fps_);
+  }
   uint32_t refreshes = f.refresh - windowStartRefresh_;
   if (refreshes < 60) return;
   redraw(windowFrames_ * 1e6f / (refreshes * float(Vsync::periodUs())));
@@ -42,9 +46,10 @@ void StatsLayer::update(const FrameInfo &f) {
 }
 
 void StatsLayer::redraw(float fps) {
-  char text[32];
+  char text[48];
+  fps_ = fps;
   uint32_t torn = engine_.renderer().tornCount();
-  snprintf(text, sizeof(text), "%.0f fps  %u torn", fps, torn);
+  snprintf(text, sizeof(text), "%.0f fps  %u torn%s%s", fps, torn, *note_ ? "  " : "", note_);
   auto &c = canvas();
   clear();
   c.fillRoundRect(0, 0, c.width(), c.height(), c.height() / 2, torn ? c.color565(150, 20, 20) : TFT_BLACK);

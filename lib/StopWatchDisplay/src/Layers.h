@@ -61,10 +61,18 @@ class StatsLayer : public SpriteLayer {
   // Centered horizontally at row y.
   bool begin(int y = 34);
   void update(const FrameInfo &f) override;
+  // Short extra text after the numbers (e.g. a mode); shown on the next redraw.
+  void setNote(const char *note) {
+    note_ = note;
+    noteChanged_ = true;
+  }
 
  private:
   void redraw(float fps);
   Engine &engine_;
+  const char *note_ = "";
+  bool noteChanged_ = false;
+  float fps_ = 0;
   uint32_t windowStartRefresh_ = 0, windowFrames_ = 0;
 };
 
