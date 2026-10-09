@@ -34,6 +34,12 @@
 
 namespace swd {
 
+// Dirty areas are tracked per band of this many rows (the renderer's strip
+// height), as x-intervals, so thin diagonal shapes don't dirty their whole
+// bounding box.
+constexpr int kBandRows = 32;
+constexpr int kBands = (kHeight + kBandRows - 1) / kBandRows;
+
 struct Rect {
   int x0 = 0, y0 = 0, x1 = 0, y1 = 0;  // [x0, x1) x [y0, y1)
 
@@ -175,11 +181,20 @@ class Engine {
   StripRenderer &renderer() { return renderer_; }
   uint32_t skipped() const { return pacer_.skipped(); }
   const Counters &counters() const { return counters_; }
+  // Render-core time spent in layer i (in add() order) during the last draw.
+  uint32_t layerRenderUs(int i) const { return i >= 0 && i < layerCount_ ? layerUs_[i] : 0; }
+  int layerCount() const { return layerCount_; }
 
  private:
   friend class Layer;
   static constexpr int kMaxLayers = 16;
-  static constexpr int kMaxDirty = 16;
+  static constexpr int kMaxIntervals = 6;  // per band; more get merged
+
+  struct Band {
+    int16_t y0, y1;  // dirty rows within the band
+    uint8_t n;
+    int16_t x0[kMaxIntervals], x1[kMaxIntervals];
+  };
 
   void addDirty(const Rect &r);
   void dispatch(const Event &e);
@@ -192,12 +207,13 @@ class Engine {
   FramePacer pacer_{1};
   Layer *layers_[kMaxLayers] = {};
   int layerCount_ = 0;
-  Rect dirty_[kMaxDirty];
-  int dirtyCount_ = 0;
+  Band bands_[kBands] = {};
+  bool dirty_ = false;
   uint32_t startRefresh_ = 0, lastRefresh_ = 0;
   FrameInfo info_ = {};
   FrameStats last_ = {};
   Counters counters_ = {};
+  uint32_t layerUs_[kMaxLayers] = {};
   QueueHandle_t events_ = nullptr;
   std::function<void(const Event &)> handler_;
 };

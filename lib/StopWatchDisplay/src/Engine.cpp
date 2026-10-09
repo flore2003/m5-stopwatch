@@ -50,30 +50,46 @@ void Engine::add(Layer &layer) {
   layer.invalidate();
 }
 
-// Keeps the dirty list small and its rects non-overlapping (drawRegions
-// requires that): a new rect is merged with every rect it touches.
+// Dirty areas are kept per band as sorted, non-overlapping x-intervals
+// (drawRegions needs non-overlapping regions). Intervals closer than kGap
+// are joined: one wider transfer is cheaper than two.
 void Engine::addDirty(const Rect &in) {
+  constexpr int kGap = 16;
   Rect r = in.intersect(Rect::screen());
   if (r.empty()) return;
-  bool merged = true;
-  while (merged) {
-    merged = false;
-    for (int i = 0; i < dirtyCount_; i++) {
-      if (dirty_[i].intersects(r)) {
-        r = r.unite(dirty_[i]);
-        dirty_[i] = dirty_[--dirtyCount_];
-        merged = true;
-        break;
+  dirty_ = true;
+  for (int b = r.y0 / kBandRows; b * kBandRows < r.y1 && b < kBands; b++) {
+    Band &band = bands_[b];
+    int by0 = max(r.y0, b * kBandRows), by1 = min(r.y1, (b + 1) * kBandRows);
+    if (band.n == 0) {
+      band.y0 = by0, band.y1 = by1;
+    } else {
+      band.y0 = min<int>(band.y0, by0), band.y1 = max<int>(band.y1, by1);
+    }
+    int x0 = r.x0, x1 = r.x1;
+    // Absorb every interval that overlaps or nearly touches [x0, x1).
+    int k = 0;
+    for (int i = 0; i < band.n; i++) {
+      if (band.x1[i] + kGap >= x0 && x1 + kGap >= band.x0[i]) {
+        x0 = min<int>(x0, band.x0[i]), x1 = max<int>(x1, band.x1[i]);
+      } else {
+        band.x0[k] = band.x0[i], band.x1[k] = band.x1[i], k++;
       }
     }
-  }
-  if (dirtyCount_ < kMaxDirty) {
-    dirty_[dirtyCount_++] = r;
-  } else {
-    // Out of slots: fold everything into one rect.
-    for (int i = 0; i < dirtyCount_; i++) r = r.unite(dirty_[i]);
-    dirty_[0] = r;
-    dirtyCount_ = 1;
+    band.n = k;
+    if (band.n == kMaxIntervals) {
+      // Full: fold everything into one interval.
+      for (int i = 0; i < band.n; i++) x0 = min<int>(x0, band.x0[i]), x1 = max<int>(x1, band.x1[i]);
+      band.n = 0;
+    }
+    // Insert sorted by x.
+    int pos = band.n;
+    while (pos > 0 && band.x0[pos - 1] > x0) {
+      band.x0[pos] = band.x0[pos - 1], band.x1[pos] = band.x1[pos - 1];
+      pos--;
+    }
+    band.x0[pos] = x0, band.x1[pos] = x1;
+    band.n++;
   }
 }
 
@@ -144,7 +160,7 @@ void Engine::frame() {
   counters_.frames++;
   uint32_t s0 = micros();
   bool resumed = false;
-  if (dirtyCount_ == 0 && !anyAnimating() && uxQueueMessagesWaiting(events_) == 0) {
+  if (!dirty_ && !anyAnimating() && uxQueueMessagesWaiting(events_) == 0) {
     // Nothing to do: sleep until an event (or the timeout), then resync.
     Event e;
     xQueuePeek(events_, &e, pdMS_TO_TICKS(cfg_.idleTimeoutMs));
@@ -171,26 +187,29 @@ void Engine::frame() {
   }
 
   last_ = {};
-  if (dirtyCount_ > 0) {
+  if (dirty_) {
     int area = 0;
-    for (int i = 0; i < dirtyCount_; i++) area += dirty_[i].area();
-    Region regions[kMaxDirty];
+    for (const Band &b : bands_) {
+      for (int i = 0; i < b.n; i++) area += (b.x1[i] - b.x0[i]) * (b.y1 - b.y0);
+    }
+    Region regions[kBands * kMaxIntervals];
     int n = 0;
     if (area > cfg_.fullFrameThreshold * kWidth * kHeight) {
       regions[n++] = {0, 0, kWidth, kHeight};
       last_.full = true;
     } else {
-      for (int i = 0; i < dirtyCount_; i++) {
-        const Rect &r = dirty_[i];
-        regions[n++] = {r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0};
+      for (const Band &b : bands_) {
+        for (int i = 0; i < b.n; i++) regions[n++] = {b.x0[i], b.y0, b.x1[i] - b.x0[i], b.y1 - b.y0};
       }
     }
-    dirtyCount_ = 0;
+    for (Band &b : bands_) b.n = 0;
+    dirty_ = false;
+    memset(layerUs_, 0, sizeof(layerUs_));
     last_.drawUs = renderer_.drawRegions(regions, n);
-    counters_.draws++;
     last_.regions = n;
     last_.torn = renderer_.lastStats().torn;
     last_.slackUs = renderer_.lastStats().slackUs;
+    counters_.draws++;
   }
   info_.frame++;
 }
@@ -203,7 +222,11 @@ void Engine::renderSpan(uint16_t *dst, int x, int y, int w, int rows, void *self
   Rect sr = s.rect();
   for (int i = 0; i < e->layerCount_; i++) {
     const Layer *l = e->layers_[i];
-    if (l->visible_ && l->bounds().intersects(sr)) l->render(s);
+    if (l->visible_ && l->bounds().intersects(sr)) {
+      uint32_t t0 = micros();
+      l->render(s);
+      e->layerUs_[i] += micros() - t0;
+    }
   }
 }
 
