@@ -49,8 +49,15 @@ void setupDisplay(uint8_t brightness) {
 
 static volatile uint32_t teCount = 0;
 static volatile uint32_t teEdgeUs = 0;
+static volatile uint32_t tePeriod16 = 0;  // average period, 1/16 us
 static void IRAM_ATTR onTE() {
-  teEdgeUs = micros();
+  uint32_t t = micros(), d = t - teEdgeUs;
+  // Average plausible periods only (a missed edge would double it).
+  if (teCount > 2 && d > kRefreshUs * 3 / 4 && d < kRefreshUs * 5 / 4) {
+    uint32_t p = tePeriod16 ? tePeriod16 : kRefreshUs * 16;
+    tePeriod16 = p + (int32_t(d * 16 - p) >> 5);
+  }
+  teEdgeUs = t;
   teCount = teCount + 1;
 }
 
@@ -62,6 +69,8 @@ void Vsync::begin(int pin) {
 uint32_t Vsync::count() { return teCount; }
 
 uint32_t Vsync::lastEdgeUs() { return teEdgeUs; }
+
+uint32_t Vsync::periodUs() { return tePeriod16 ? (tePeriod16 + 8) / 16 : kRefreshUs; }
 
 void Vsync::waitAfterEdge(uint32_t us) {
   uint32_t edge = teEdgeUs;
@@ -196,6 +205,7 @@ uint32_t StripRenderer::drawRegions(const Region *regions, int count) {
 
   auto *panel = directPanel();
   auto *bus = panel->getBus();
+  Piece pieces[kMaxJobs];
   panel->beginTransaction();
   jobs[0].dst = buf_[0];
   runJob(jobs[0]);
@@ -214,21 +224,69 @@ uint32_t StripRenderer::drawRegions(const Region *regions, int count) {
     // the render core fills next (the one before this) is free again.
     panel->setWindow(b.x, b.y, b.x + b.w - 1, b.y + b.rows - 1);
     panel->start_qspi();
+    pieces[i] = {b.y, b.rows, micros(), 0};
     bus->writeBytes(reinterpret_cast<const uint8_t *>(b.dst), b.w * b.rows * 2, true, true);
-    if (i + 1 < n) {
+    bool rendering = i + 1 < n;
+    if (rendering) {
       jobs[i + 1].dst = buf_[(i + 1) & 1];
       runJob(jobs[i + 1]);  // renders while this strip's DMA runs
-      w0 = micros();
-      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-      stats_.waitRender += micros() - w0;
     }
+    // Wait for both the render core and this strip's DMA, noting when the
+    // DMA finished (for the tear check).
+    w0 = micros();
+    uint32_t renderDone = w0;
+    for (;;) {
+      if (!pieces[i].end && !bus->busy()) pieces[i].end = micros();
+      if (rendering && ulTaskNotifyTake(pdTRUE, 0)) {
+        rendering = false;
+        renderDone = micros();
+      }
+      if (!rendering && pieces[i].end) break;
+    }
+    if (i + 1 < n) stats_.waitRender += renderDone - w0;
+    else stats_.flush = pieces[i].end - w0;
   }
-  uint32_t f0 = micros();
-  panel->endTransaction();  // waits for the last strip's DMA
-  stats_.flush = micros() - f0;
+  panel->endTransaction();
+  checkTearing(pieces, n, edge, Vsync::periodUs(), stats_);
+  draws_++;
+  if (stats_.torn) torn_++;
   stats_.render = renderUs_;
   stats_.bands = n;
   return stats_.total = micros() - t0;
+}
+
+void StripRenderer::checkTearing(const Piece *pieces, int n, uint32_t edgeUs, uint32_t periodUs, Stats &out) {
+  out.torn = false;
+  out.slackUs = INT32_MAX;
+  out.refresh = -1;
+  bool first = true;
+  for (int i = 0; i < n; i++) {
+    const Piece &p = pieces[i];
+    int32_t s0 = int32_t(p.start - edgeUs), s1 = int32_t(p.end - edgeUs);
+    int shown = INT8_MIN;
+    // Compare the write (start..end, top to bottom) with the scan of this
+    // piece's rows in the refreshes around it. The write and a scan can only
+    // cross if one is ahead at the piece's top row and behind at its bottom.
+    for (int k = -1; k <= 3; k++) {
+      int32_t a = k * int32_t(periodUs) + int32_t(scanTimeUs(p.y));
+      int32_t b = k * int32_t(periodUs) + int32_t(scanTimeUs(p.y + p.rows));
+      int32_t d0 = s0 - a, d1 = s1 - b;
+      if ((d0 > 0) != (d1 > 0)) {
+        out.torn = true;
+        out.slackUs = min(out.slackUs, int32_t(0));
+      } else {
+        out.slackUs = min(out.slackUs, min(abs(d0), abs(d1)));
+      }
+      // First refresh whose scan reaches the piece only after it's written.
+      if (shown == INT8_MIN && d0 <= 0 && d1 <= 0) shown = k;
+    }
+    if (first) {
+      out.refresh = shown;
+      first = false;
+    } else if (shown != out.refresh) {
+      out.torn = true;  // parts of one draw appear in different refreshes
+    }
+  }
 }
 
 // ---- Overlay

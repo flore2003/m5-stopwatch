@@ -68,6 +68,9 @@ class Vsync {
   static uint32_t lastEdgeUs();
   // Busy-waits until `us` microseconds after the latest TE edge.
   static void waitAfterEdge(uint32_t us);
+  // Refresh period measured from TE edges (averaged); kRefreshUs until the
+  // first few edges have been seen.
+  static uint32_t periodUs();
 };
 
 // Starts frames on every Nth refresh. A frame may start up to kScanStartUs
@@ -144,11 +147,31 @@ class StripRenderer {
     uint32_t total;       // whole draw, until the pixels are on the panel
     uint32_t render;      // time spent in the render callback (render core)
     uint32_t waitRender;  // time this core waited for the render core
-    uint32_t flush;       // time endWrite() waited for the last transfers
+    uint32_t flush;       // time spent waiting for the last transfer
     uint32_t waitScan;    // time spent waiting for the scan (followScan)
     uint16_t bands;
+    // Tear check: from each piece's measured transfer window and the scan
+    // model, whether the scan crossed a piece mid-write, or pieces of this
+    // draw landed in different refreshes. Either shows as a tear.
+    bool torn;
+    // Closest the scan came to crossing any piece; small means the draw is
+    // near its timing limits.
+    int32_t slackUs;
+    // Refresh that shows this draw, counted from the TE edge before it began
+    // (0: the refresh that edge started, 1: the next one).
+    int8_t refresh;
   };
   const Stats &lastStats() const { return stats_; }
+  uint32_t drawCount() const { return draws_; }
+  uint32_t tornCount() const { return torn_; }
+
+  // The tear check on its own: pieces with rows [y, y + rows) written from
+  // start[i] to end[i] (micros), relative to a TE edge. Exposed for tests.
+  struct Piece {
+    int16_t y, rows;
+    uint32_t start, end;
+  };
+  static void checkTearing(const Piece *pieces, int n, uint32_t edgeUs, uint32_t periodUs, Stats &out);
 
  private:
   struct Job {
@@ -168,6 +191,7 @@ class StripRenderer {
   volatile Job job_ = {};
   volatile uint32_t renderUs_ = 0;
   Stats stats_ = {};
+  uint32_t draws_ = 0, torn_ = 0;
 };
 
 // A small sprite composited over rendered pixels. Pixels equal to

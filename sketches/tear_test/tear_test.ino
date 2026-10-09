@@ -9,7 +9,8 @@
 // - NO SYNC: frames start at arbitrary times (a 13 ms loop against a 16.76 ms
 //   refresh). This one tears; it shows what tearing looks like here.
 // KEY B cycles the speed; tapping toggles 60/30 fps.
-// The label shows the mode; serial prints timing.
+// The label shows the mode; serial prints timing and the library's tear check
+// (torn draws per second, closest call). Sending 'm' over serial = KEY A.
 #include <M5Unified.h>
 #include <StopWatchDisplay.h>
 
@@ -78,7 +79,11 @@ void setup() {
 }
 
 void loop() {
-  static uint32_t windowStart = millis(), frames = 0, worstUs = 0;
+  static uint32_t windowStart = millis(), frames = 0, worstUs = 0, tornStart = 0;
+  static int32_t minSlack = INT32_MAX;
+  while (Serial.available()) {
+    if (Serial.read() == 'm') toggleScan = true;
+  }
   static int interval = 1;
   if (toggleScan) {
     toggleScan = false;
@@ -107,14 +112,18 @@ void loop() {
   }
   offset = (offset + kSpeeds[speedIdx] * interval) % kPeriod;
   worstUs = max(worstUs, renderer.drawFrame());
+  minSlack = min(minSlack, renderer.lastStats().slackUs);
   frames++;
 
   uint32_t elapsed = millis() - windowStart;
   if (elapsed >= 1000) {
     float fps = frames * 1000.0f / elapsed;
     updateLabel(fps);
-    Serial.printf("fps=%.1f mode=%d frame_worst_us=%u skipped=%u\n", fps, mode, worstUs,
-                  pacer.skipped());
+    Serial.printf("fps=%.1f mode=%d frame_worst_us=%u skipped=%u torn=%u/%u min_slack_us=%d refresh=%d period_us=%u\n",
+                  fps, mode, worstUs, pacer.skipped(), renderer.tornCount() - tornStart, frames, minSlack,
+                  renderer.lastStats().refresh, swd::Vsync::periodUs());
+    tornStart = renderer.tornCount();
+    minSlack = INT32_MAX;
     windowStart = millis();
     frames = 0;
     worstUs = 0;
