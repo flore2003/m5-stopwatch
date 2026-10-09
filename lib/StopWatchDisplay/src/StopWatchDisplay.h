@@ -7,8 +7,10 @@
 // - After the TE edge the panel blanks for ~2.95 ms, then scans rows top to
 //   bottom at ~29.7 us per row (13.8 ms for 466 rows). So row r is scanned
 //   at TE + kScanStartUs + r * kScanRowUs.
-// - A full 468x466 RGB565 frame takes ~22-24 ms on the QSPI bus, so full-screen
-//   updates top out at 30 fps (every second refresh).
+// - M5GFX's StopWatch setup draws into a PSRAM framebuffer and copies it to
+//   the panel on endWrite(). StripRenderer bypasses that and DMAs its SRAM
+//   strips straight to the panel: a full frame takes ~11 ms, so full-screen
+//   updates can run at 60 fps.
 //
 // Tear-free rule: write each row after the scan has passed it, and finish it
 // before the scan comes round again (one refresh later). The scan then shows
@@ -68,8 +70,9 @@ class Vsync {
   static void waitAfterEdge(uint32_t us);
 };
 
-// Starts frames on every Nth refresh. If a frame runs long, it resyncs to the
-// next refresh instead of trying to catch up (and counts a skip).
+// Starts frames on every Nth refresh. A frame may start up to kScanStartUs
+// after its TE edge (draws chase the scan, so that's still on time). If it's
+// later, the pacer resyncs to the next refresh and counts a skip.
 class FramePacer {
  public:
   explicit FramePacer(uint8_t refreshesPerFrame = 2) : interval_(refreshesPerFrame) {}
@@ -119,6 +122,7 @@ class StripRenderer {
   bool begin(RenderFn fn, void *ctx, const Config &cfg);
   void setCircleOnly(bool on) { cfg_.circleOnly = on; }  // call between draws
   void setFollowScan(bool on) { cfg_.followScan = on; }
+  bool followScan() const { return cfg_.followScan; }
   void setScanMargin(uint32_t us) { cfg_.scanMarginUs = us; }
   uint32_t scanMargin() const { return cfg_.scanMarginUs; }
   bool circleOnly() const { return cfg_.circleOnly; }

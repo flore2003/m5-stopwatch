@@ -1,8 +1,37 @@
 #include "StopWatchDisplay.h"
 
 #include <esp_heap_caps.h>
+#include <lgfx/v1/panel/Panel_AMOLED.hpp>
 
 namespace swd {
+
+// ---- Direct panel output
+//
+// On the StopWatch, M5GFX draws into a PSRAM framebuffer and, on endWrite(),
+// copies the bounding box of everything changed to the panel line by line.
+// Pushing our strips through it costs two copies (SRAM -> PSRAM -> panel,
+// ~12 + ~12 ms per full frame). We send the strips to the real panel driver
+// instead: one DMA transfer per strip, straight from SRAM. Don't draw with
+// M5.Display while a StripRenderer is in use: its framebuffer no longer
+// matches the screen, and its next flush would overwrite what we sent.
+namespace {
+
+struct FramebufferAccess : lgfx::Panel_AMOLED_Framebuffer {
+  // _panel is protected; this is the usual way to reach it from outside.
+  static lgfx::Panel_AMOLED *panelOf(lgfx::IPanel *fb) {
+    return static_cast<FramebufferAccess *>(static_cast<lgfx::Panel_AMOLED_Framebuffer *>(fb))->_panel;
+  }
+};
+
+lgfx::Panel_AMOLED *directPanel() {
+  static lgfx::Panel_AMOLED *panel = nullptr;
+  if (!panel && M5.getBoard() == m5::board_t::board_M5StopWatch) {
+    panel = FramebufferAccess::panelOf(M5.Display.getPanel());
+  }
+  return panel;
+}
+
+}  // namespace
 
 void setupDisplay(uint8_t brightness) {
   auto *panel = M5.Display.getPanel();
@@ -52,9 +81,13 @@ bool Vsync::waitFor(uint32_t target, uint32_t timeoutUs) {
 
 void FramePacer::wait() {
   uint32_t now = Vsync::count();
-  if (!started_ || int32_t(now - next_) >= 0) {
-    if (started_) skipped_++;
+  if (!started_) {
     started_ = true;
+    next_ = now + 1;
+  } else if (int32_t(now - next_) > 0 || (now == next_ && micros() - Vsync::lastEdgeUs() > kScanStartUs)) {
+    // Missed the target refresh. Starting during the blanking after its TE
+    // edge is still fine for draws that chase the scan; later costs a skip.
+    skipped_++;
     next_ = now + 1;
   }
   Vsync::waitFor(next_);
@@ -67,8 +100,12 @@ bool StripRenderer::begin(RenderFn fn, void *ctx) { return begin(fn, ctx, Config
 
 bool StripRenderer::begin(RenderFn fn, void *ctx, const Config &cfg) {
   cfg_ = cfg;
+  // One strip must fit a single SPI transaction (32 KiB); longer writes make
+  // the bus driver sleep a tick between chunks.
+  cfg_.stripRows = constrain(cfg_.stripRows & ~1, 2, 32768 / (kWidth * 2) & ~1);
   fn_ = fn;
   ctx_ = ctx;
+  if (!directPanel()) return false;
   for (auto &b : buf_) {
     b = static_cast<uint16_t *>(
         heap_caps_malloc(kWidth * cfg_.stripRows * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
@@ -146,7 +183,10 @@ uint32_t StripRenderer::drawRegions(const Region *regions, int count) {
   for (int by = yMin - yMin % cfg_.stripRows; by < yMax; by += cfg_.stripRows) {
     for (int i = 0; i < count && n < kMaxJobs; i++) {
       const Region &r = regions[i];
-      int y0 = max(by, max(0, r.y)), y1 = min(by + cfg_.stripRows, min(kHeight, r.y + r.h)), sx, sw;
+      // The CO5300 wants row windows that start on an even row and cover an
+      // even number of rows (M5GFX's own flush rounds the same way).
+      int y0 = max(by, max(0, r.y) & ~1);
+      int y1 = min(by + cfg_.stripRows, min(kHeight, (r.y + r.h + 1) & ~1)), sx, sw;
       if (y0 >= y1 || r.w <= 0) continue;
       if (span(r.x, y0, r.w, y1 - y0, sx, sw)) jobs[n++] = {nullptr, int16_t(sx), int16_t(y0), int16_t(sw), int16_t(y1 - y0)};
     }
@@ -154,17 +194,15 @@ uint32_t StripRenderer::drawRegions(const Region *regions, int count) {
   if (n == 0) return stats_.total = micros() - t0;
   const uint32_t edge = Vsync::lastEdgeUs();
 
-  M5.Display.startWrite();
+  auto *panel = directPanel();
+  auto *bus = panel->getBus();
+  panel->beginTransaction();
   jobs[0].dst = buf_[0];
   runJob(jobs[0]);
   uint32_t w0 = micros();
   ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   stats_.waitRender += micros() - w0;
   for (int i = 0; i < n; i++) {
-    if (i + 1 < n) {
-      jobs[i + 1].dst = buf_[(i + 1) & 1];
-      runJob(jobs[i + 1]);  // renders into the other buffer
-    }
     const Job &b = jobs[i];
     if (cfg_.followScan) {
       uint32_t passed = scanTimeUs(b.y + b.rows) + cfg_.scanMarginUs, s0 = micros();
@@ -172,17 +210,21 @@ uint32_t StripRenderer::drawRegions(const Region *regions, int count) {
       }
       stats_.waitScan += micros() - s0;
     }
-    // Returns once the transfer is queued; the next setWindow waits for it.
-    M5.Display.pushImageDMA(b.x, b.y, b.w, b.rows, reinterpret_cast<const lgfx::swap565_t *>(b.dst));
-    M5.Display.waitDMA();
+    // setWindow waits for the previous strip's DMA to finish, so the buffer
+    // the render core fills next (the one before this) is free again.
+    panel->setWindow(b.x, b.y, b.x + b.w - 1, b.y + b.rows - 1);
+    panel->start_qspi();
+    bus->writeBytes(reinterpret_cast<const uint8_t *>(b.dst), b.w * b.rows * 2, true, true);
     if (i + 1 < n) {
+      jobs[i + 1].dst = buf_[(i + 1) & 1];
+      runJob(jobs[i + 1]);  // renders while this strip's DMA runs
       w0 = micros();
       ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
       stats_.waitRender += micros() - w0;
     }
   }
   uint32_t f0 = micros();
-  M5.Display.endWrite();  // the last transfers only complete here
+  panel->endTransaction();  // waits for the last strip's DMA
   stats_.flush = micros() - f0;
   stats_.render = renderUs_;
   stats_.bands = n;

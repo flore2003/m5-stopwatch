@@ -1,4 +1,4 @@
-// Animated full-screen gradient, tear-free at 30 fps, with an fps indicator.
+// Animated full-screen gradient, tear-free at 60 fps, with an fps indicator.
 //
 // Rendering, pacing, the gradient and the panel quirks live in
 // lib/StopWatchDisplay; this sketch wires them together.
@@ -32,7 +32,7 @@ static void render(uint16_t *dst, int x0, int y0, int w, int rows, void *) {
 }
 
 static swd::StripRenderer renderer;
-static swd::FramePacer pacer(2);  // every second refresh: 30 fps
+static swd::FramePacer pacer(1);  // every refresh: 60 fps
 static volatile bool toggleCircle = false;
 
 // Input runs on the render core at low priority, so touch I2C reads never
