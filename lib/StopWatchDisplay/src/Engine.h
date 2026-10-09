@@ -9,14 +9,26 @@
 //   engine.add(ball);
 //   loop() { engine.frame(); }
 //
-// Each frame() waits for the next refresh, calls update() on every layer,
-// and redraws only what the layers invalidated. Layers change their state in
-// update() (main core) and call invalidate() for every area whose pixels
-// change; render() runs on the render core and must only read state. A layer
-// that animates more slowly (e.g. a background at 30 fps) simply invalidates
-// less often, and areas redrawn for other layers in between render it with
-// the state that is already on screen.
+// Each frame() waits for the next refresh, delivers input events, calls
+// update() on every layer, and redraws only what the layers invalidated.
+// Layers change their state in onEvent()/update() (main core) and call
+// invalidate() for every area whose pixels change; render() runs on the
+// render core and must only read state. A layer that animates more slowly
+// (e.g. a background at 30 fps) simply invalidates less often, and areas
+// redrawn for other layers in between render it with the state that is
+// already on screen.
+//
+// Threading: draws run synchronously inside frame(), so any code on the
+// loop task (setup(), loop(), event handlers, update()) runs between draws
+// and may change layers freely. Other tasks must not touch layers; they can
+// post() events instead.
+//
+// Idle: when no layer is animating(), nothing is invalidated and no events
+// are waiting, frame() sleeps until an event arrives (or idleTimeoutMs
+// passes) instead of waking on every refresh.
 #pragma once
+
+#include <functional>
 
 #include "StopWatchDisplay.h"
 
@@ -43,6 +55,36 @@ struct Span {
   uint16_t *at(int px, int py) const { return dst + (py - y) * w + (px - x); }
 };
 
+struct Event {
+  enum Type : uint8_t {
+    TouchDown,   // x, y
+    TouchMove,   // x, y (while pressed)
+    TouchUp,     // x, y
+    Tap,         // x, y: short press and release in place
+    ButtonDown,  // button
+    ButtonUp,    // button
+    ButtonHold,  // button: held for ~500 ms
+    User,        // value: for post() from app code
+  };
+  enum Button : uint8_t { A = 0, B = 1 };  // A: yellow, upper left; B: blue, upper right
+
+  Type type;
+  uint8_t button = 0;
+  int16_t x = 0, y = 0;
+  int32_t value = 0;
+
+  static Event user(int32_t value) {
+    Event e = {User};
+    e.value = value;
+    return e;
+  }
+  static Event buttonDown(uint8_t button) {
+    Event e = {ButtonDown};
+    e.button = button;
+    return e;
+  }
+};
+
 struct FrameInfo {
   uint32_t frame;    // frames drawn so far
   uint32_t refresh;  // panel refreshes since begin()
@@ -56,8 +98,14 @@ class Layer {
  public:
   virtual ~Layer() = default;
 
+  // Main core, before update(), front-most layer first. Return true to
+  // consume the event (layers below and the app handler won't see it).
+  virtual bool onEvent(const Event &) { return false; }
   // Main core, once per frame, before anything renders.
   virtual void update(const FrameInfo &) {}
+  // True while the layer needs update() every refresh (it's moving). When no
+  // layer is animating, the engine idles until the next event.
+  virtual bool animating() const { return false; }
   // Render core. Draw this layer's pixels inside s (only where bounds()
   // overlaps it). Layers are drawn back to front; the bottom layer must cover
   // the whole screen.
@@ -86,6 +134,19 @@ class Engine {
     // Dirty areas covering more than this share of the screen are drawn as
     // one full frame (fewer, larger transfers).
     float fullFrameThreshold = 0.5f;
+    // Read buttons and touch in an engine task and deliver them as events.
+    bool input = true;
+    // Longest frame() sleeps while idle, so loop() still runs now and then.
+    uint32_t idleTimeoutMs = 1000;
+  };
+
+  // Since begin().
+  struct Counters {
+    uint32_t frames;     // frame() calls
+    uint32_t draws;      // frames that drew something
+    uint32_t idleWaits;  // frames that slept until an event or timeout
+    uint32_t events;     // events delivered
+    uint64_t sleptUs;    // time the loop task spent blocked (vsync + idle)
   };
 
   struct FrameStats {
@@ -101,6 +162,11 @@ class Engine {
   bool begin(const Config &cfg);
   void add(Layer &layer);  // back to front
 
+  // Events nobody consumed end up here (main core).
+  void onEvent(std::function<void(const Event &)> handler) { handler_ = std::move(handler); }
+  // Queue an event for the next frame. Safe from any task.
+  bool post(const Event &e);
+
   // One frame: wait for the next refresh, update layers, draw what's dirty.
   void frame();
 
@@ -108,6 +174,7 @@ class Engine {
   const FrameInfo &info() const { return info_; }
   StripRenderer &renderer() { return renderer_; }
   uint32_t skipped() const { return pacer_.skipped(); }
+  const Counters &counters() const { return counters_; }
 
  private:
   friend class Layer;
@@ -115,7 +182,10 @@ class Engine {
   static constexpr int kMaxDirty = 16;
 
   void addDirty(const Rect &r);
+  void dispatch(const Event &e);
+  bool anyAnimating() const;
   static void renderSpan(uint16_t *dst, int x, int y, int w, int rows, void *self);
+  static void inputTask(void *self);
 
   Config cfg_;
   StripRenderer renderer_;
@@ -127,6 +197,9 @@ class Engine {
   uint32_t startRefresh_ = 0, lastRefresh_ = 0;
   FrameInfo info_ = {};
   FrameStats last_ = {};
+  Counters counters_ = {};
+  QueueHandle_t events_ = nullptr;
+  std::function<void(const Event &)> handler_;
 };
 
 }  // namespace swd

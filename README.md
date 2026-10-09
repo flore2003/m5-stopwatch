@@ -60,9 +60,19 @@ Engine level (`Engine.h`, `Layers.h`), for apps:
   changes; `FrameInfo::dt` counts whole refreshes) and `render(Span)` (render core: only
   read state). A layer that animates more slowly just invalidates less often; areas
   redrawn for other layers show it unchanged.
-- `GradientLayer` (interval N = update every N refreshes), `SpriteLayer` (M5GFX canvas with
-  a transparent key color; `moveTo()` invalidates old and new area), `StatsLayer` (fps and
-  tear count pill).
+- Input arrives as events (`Event`: touch down/move/up, tap, button down/up/hold): the
+  engine polls buttons and touch on the render core and delivers events in `frame()`,
+  front-most layer first (`onEvent()` returns true to consume), then to
+  `engine.onEvent(handler)`. Other tasks (or serial test hooks) use `engine.post()`.
+- Threading rule: everything on the loop task runs between draws, so it may change layers;
+  other tasks must not touch layers, only `post()` events.
+- Idle: when no layer is `animating()`, nothing is invalidated and no events wait,
+  `frame()` sleeps until an event (or `idleTimeoutMs`). Vsync waits block on a semaphore
+  instead of spinning. `engine.counters()` reports frames, draws, idle sleeps and time
+  asleep (`sketches/idle_test`: 99–100% asleep when untouched).
+- `GradientLayer` (interval N = update every N refreshes), `SolidLayer`, `SpriteLayer` (M5GFX
+  canvas with a transparent key color; `moveTo()` invalidates old and new area),
+  `StatsLayer` (fps and tear count pill; animating, so it keeps the engine awake).
 
 Low level (`StopWatchDisplay.h`): `setupDisplay()` (geometry fix), `Vsync` (TE refresh
 counter, measured period), `FramePacer`, `StripRenderer` (render callback, two-core SRAM
@@ -109,6 +119,7 @@ What runs where:
 - `sketches/ball`: ball over the gradient (engine). KEY A: gradient every refresh (full
   frames) or every second refresh (engine draws 30 full frames + 30 ball patches per
   second). Both 60 fps, 0 torn.
+- `sketches/idle_test`: static scene, a square follows your finger; shows idling.
 - `sketches/tear_test`: tearing test pattern; `sketches/scan_probe`: scan timing probe.
 - Dead ends kept for reference: alternating screen halves (one half shows a refresh late,
   so things tear where they meet) and a scan model without the 2.95 ms blanking (patches

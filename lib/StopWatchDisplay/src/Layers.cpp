@@ -12,6 +12,14 @@ void GradientLayer::update(const FrameInfo &f) {
   invalidate();
 }
 
+// ---- SolidLayer
+
+void SolidLayer::render(const Span &s) const {
+  uint32_t pair = uint32_t(color_) | uint32_t(color_) << 16;
+  auto *p = reinterpret_cast<uint32_t *>(s.dst);  // w is even, so pairs fit
+  for (int i = 0, n = s.w * s.rows / 2; i < n; i++) p[i] = pair;
+}
+
 // ---- SpriteLayer
 
 bool SpriteLayer::begin(int w, int h) { return overlay_.begin(w, h); }

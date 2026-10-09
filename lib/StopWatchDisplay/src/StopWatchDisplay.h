@@ -82,6 +82,9 @@ class FramePacer {
   void setInterval(uint8_t refreshesPerFrame) { interval_ = refreshesPerFrame; }
   // Blocks until the next scheduled refresh edge.
   void wait();
+  // Forget the schedule (e.g. after idling); the next wait() takes the next
+  // edge without counting a skip.
+  void reset();
   uint32_t skipped() const { return skipped_; }
 
  private:

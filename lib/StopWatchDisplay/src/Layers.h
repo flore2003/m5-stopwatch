@@ -18,6 +18,7 @@ class GradientLayer : public Layer {
   void setInterval(uint8_t refreshes) { interval_ = refreshes ? refreshes : 1; }
 
   void update(const FrameInfo &f) override;
+  bool animating() const override { return true; }
   void render(const Span &s) const override { Gradient::render(state_, s.dst, s.x, s.y, s.w, s.rows); }
 
  private:
@@ -26,6 +27,20 @@ class GradientLayer : public Layer {
   uint8_t interval_ = 1;
   uint32_t lastRefresh_ = 0;
   bool changed_ = true;
+};
+
+// A single color, e.g. a static background.
+class SolidLayer : public Layer {
+ public:
+  explicit SolidLayer(uint16_t color = rgb565(0, 0, 0)) : color_(color) {}
+  void setColor(uint16_t color) {
+    color_ = color;
+    invalidate();
+  }
+  void render(const Span &s) const override;
+
+ private:
+  uint16_t color_;
 };
 
 // A sprite drawn with M5GFX into an SRAM canvas and composited over the
@@ -61,6 +76,8 @@ class StatsLayer : public SpriteLayer {
   // Centered horizontally at row y.
   bool begin(int y = 34);
   void update(const FrameInfo &f) override;
+  // Keeps the engine awake to count frames; hide it to let a scene idle.
+  bool animating() const override { return true; }
   // Short extra text after the numbers (e.g. a mode); shown on the next redraw.
   void setNote(const char *note) {
     note_ = note;

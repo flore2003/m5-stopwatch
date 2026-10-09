@@ -15,7 +15,6 @@
 static constexpr int kBallR = 26;
 static constexpr float kGravity = 1400;      // px/s^2, screen down
 static constexpr float kRestitution = 0.88;  // energy kept per bounce
-static volatile bool kick = false, toggleMode = false;
 
 class Ball : public swd::SpriteLayer {
  public:
@@ -32,14 +31,19 @@ class Ball : public swd::SpriteLayer {
     return true;
   }
 
+  // A tap anywhere kicks the ball.
+  bool onEvent(const swd::Event &e) override {
+    if (e.type != swd::Event::Tap) return false;
+    vy_ -= 900;
+    vx_ += (esp_random() & 1) ? 300 : -300;
+    return true;
+  }
+
+  bool animating() const override { return true; }
+
   // Physics in update(): dt is whole refreshes, so motion is even on screen.
   void update(const swd::FrameInfo &f) override {
     float dt = f.dt;
-    if (kick) {
-      kick = false;
-      vy_ -= 900;
-      vx_ += (esp_random() & 1) ? 300 : -300;
-    }
     vy_ += kGravity * dt;
     px_ += vx_ * dt;
     py_ += vy_ * dt;
@@ -69,12 +73,13 @@ static swd::GradientLayer background;
 static Ball ball;
 static swd::StatsLayer stats(engine);
 
-static void inputTask(void *) {
-  for (;;) {
-    M5.update();
-    if (M5.Touch.getDetail().wasPressed()) kick = true;
-    if (M5.BtnA.wasPressed()) toggleMode = true;
-    vTaskDelay(pdMS_TO_TICKS(10));
+static int interval = 1;
+
+static void onEvent(const swd::Event &e) {
+  if (e.type == swd::Event::ButtonDown && e.button == swd::Event::A) {
+    interval = 3 - interval;  // 1 <-> 2
+    background.setInterval(interval);
+    stats.setNote(interval == 1 ? "bg 60" : "bg 30");
   }
 }
 
@@ -92,22 +97,15 @@ void setup() {
   engine.add(background);
   engine.add(ball);
   engine.add(stats);
-  xTaskCreatePinnedToCore(inputTask, "input", 4096, nullptr, 1, nullptr, 1 - xPortGetCoreID());
+  engine.onEvent(onEvent);
   Serial.println("ready");
 }
 
 void loop() {
-  static int interval = 1;
   static uint32_t windowStart = millis(), frames = 0, fullFrames = 0, worstUs = 0, tornStart = 0;
   static int32_t minSlack = INT32_MAX;
   while (Serial.available()) {
-    if (Serial.read() == 'm') toggleMode = true;
-  }
-  if (toggleMode) {
-    toggleMode = false;
-    interval = 3 - interval;  // 1 <-> 2
-    background.setInterval(interval);
-    stats.setNote(interval == 1 ? "bg 60" : "bg 30");
+    if (Serial.read() == 'm') engine.post(swd::Event::buttonDown(swd::Event::A));
   }
 
   engine.frame();

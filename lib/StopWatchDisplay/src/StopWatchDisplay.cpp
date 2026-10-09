@@ -50,6 +50,7 @@ void setupDisplay(uint8_t brightness) {
 static volatile uint32_t teCount = 0;
 static volatile uint32_t teEdgeUs = 0;
 static volatile uint32_t tePeriod16 = 0;  // average period, 1/16 us
+static SemaphoreHandle_t teSem = nullptr;  // given on every edge, for blocking waits
 static void IRAM_ATTR onTE() {
   uint32_t t = micros(), d = t - teEdgeUs;
   // Average plausible periods only (a missed edge would double it).
@@ -59,9 +60,13 @@ static void IRAM_ATTR onTE() {
   }
   teEdgeUs = t;
   teCount = teCount + 1;
+  BaseType_t woken = pdFALSE;
+  if (teSem) xSemaphoreGiveFromISR(teSem, &woken);
+  if (woken) portYIELD_FROM_ISR();
 }
 
 void Vsync::begin(int pin) {
+  if (!teSem) teSem = xSemaphoreCreateBinary();
   pinMode(pin, INPUT);
   attachInterrupt(digitalPinToInterrupt(pin), onTE, RISING);
 }
@@ -78,15 +83,24 @@ void Vsync::waitAfterEdge(uint32_t us) {
   }
 }
 
+// Blocks (instead of spinning) until the target edge: the TE interrupt gives
+// a semaphore, so the waiting core is free in the meantime. Waking takes a
+// few tens of microseconds, well inside the ~3 ms blanking after TE.
 bool Vsync::waitFor(uint32_t target, uint32_t timeoutUs) {
   uint32_t t0 = micros();
   while (int32_t(teCount - target) < 0) {
-    if (micros() - t0 > timeoutUs) return false;
+    uint32_t elapsed = micros() - t0;
+    if (elapsed > timeoutUs) return false;
+    if (teSem) {
+      xSemaphoreTake(teSem, pdMS_TO_TICKS((timeoutUs - elapsed) / 1000) + 1);
+    }
   }
   return true;
 }
 
 // ---- FramePacer
+
+void FramePacer::reset() { started_ = false; }
 
 void FramePacer::wait() {
   uint32_t now = Vsync::count();

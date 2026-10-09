@@ -8,13 +8,12 @@
 static swd::Engine engine;
 static swd::GradientLayer background;
 static swd::StatsLayer stats(engine);
-static volatile bool nextTheme = false;
+static int theme = 0;
 
-static void inputTask(void *) {
-  for (;;) {
-    M5.update();
-    if (M5.Touch.getDetail().wasPressed()) nextTheme = true;
-    vTaskDelay(pdMS_TO_TICKS(10));
+static void onEvent(const swd::Event &e) {
+  if (e.type == swd::Event::Tap) {
+    theme = (theme + 1) % swd::kGradientThemeCount;
+    background.setTheme(swd::kGradientThemes[theme]);
   }
 }
 
@@ -28,18 +27,12 @@ void setup() {
   stats.begin();
   engine.add(background);
   engine.add(stats);
-  xTaskCreatePinnedToCore(inputTask, "input", 4096, nullptr, 1, nullptr, 1 - xPortGetCoreID());
+  engine.onEvent(onEvent);
   Serial.println("ready");
 }
 
 void loop() {
-  static int theme = 0;
   static uint32_t windowStart = millis(), frames = 0, worstUs = 0;
-  if (nextTheme) {
-    nextTheme = false;
-    theme = (theme + 1) % swd::kGradientThemeCount;
-    background.setTheme(swd::kGradientThemes[theme]);
-  }
 
   engine.frame();
   frames++;
