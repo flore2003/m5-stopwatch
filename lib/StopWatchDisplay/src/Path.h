@@ -17,6 +17,7 @@
 
 #include <esp_heap_caps.h>
 
+#include <initializer_list>
 #include <memory>
 #include <new>
 #include <vector>
@@ -133,7 +134,47 @@ class VectorItem {
   bool visible_ = true;
 };
 
+// A gradient color stop: position 0..1 along the gradient, 0xRRGGBB.
+struct ColorStop {
+  float offset;
+  uint32_t color;
+};
+
+// What a fill or stroke is painted with: one color, or a linear or radial
+// gradient in the item's local coordinates (it moves with the item's
+// transform). Between stops colors are interpolated; beyond the ends the
+// end colors continue (SVG's "pad"). Implicitly converts from a color.
+struct Paint {
+  enum Kind : uint8_t { Solid, Linear, Radial };
+  static constexpr int kMaxStops = 6;
+
+  Paint(uint32_t color = 0xFFFFFF, uint8_t alpha = 255) : color(color), alpha(alpha) {}
+  // From (x0, y0) at offset 0 to (x1, y1) at offset 1.
+  static Paint linear(float x0, float y0, float x1, float y1, std::initializer_list<ColorStop> stops,
+                      uint8_t alpha = 255);
+  // From the center (offset 0) out to radius r (offset 1).
+  static Paint radial(float cx, float cy, float r, std::initializer_list<ColorStop> stops, uint8_t alpha = 255);
+
+  Kind kind = Solid;
+  uint32_t color;  // Solid
+  uint8_t alpha;   // overall opacity
+  float x0 = 0, y0 = 0, x1 = 0, y1 = 0, r = 0;
+  ColorStop stops[kMaxStops] = {};
+  uint8_t stopCount = 0;
+
+  bool operator==(const Paint &o) const;
+  bool operator!=(const Paint &o) const { return !(*this == o); }
+};
+
+enum class FillRule : uint8_t { NonZero, EvenOdd };
+enum class Cap : uint8_t { Butt, Round, Square };
+enum class Join : uint8_t { Miter, Round, Bevel };
+
 // A filled and/or stroked path with a transform.
+//
+// Fills: nonzero or even-odd. Strokes are turned into outline polygons
+// (one quad per segment plus joins and caps, as in SVG) and filled with the
+// same exact-coverage filler. Stroke widths scale with the transform.
 class PathItem : public VectorItem {
  public:
   static constexpr float kFlatness = 0.25f;  // max curve flattening error, px
@@ -145,14 +186,18 @@ class PathItem : public VectorItem {
   // again after changing it.
   void setPath(const Path &path);
   void setTransform(const Transform &t);
-  void setFill(uint32_t color, uint8_t alpha = 255);
+  void setFill(const Paint &paint);
+  void setFill(uint32_t color, uint8_t alpha) { setFill(Paint(color, alpha)); }
+  void setFillRule(FillRule rule);
   void noFill();
-  void setStroke(float width, uint32_t color, uint8_t alpha = 255);
-  // Optional 256-entry curve applied to fill edge coverage (0..255 -> 0..255),
+  void setStroke(float width, const Paint &paint, Cap cap = Cap::Round, Join join = Join::Round,
+                 float miterLimit = 4);
+  void setStroke(float width, uint32_t color, uint8_t alpha) { setStroke(width, Paint(color, alpha)); }
+  void noStroke();
+  // Optional 256-entry curve applied to edge coverage (0..255 -> 0..255),
   // e.g. a gamma that strengthens thin light-on-dark text. Referenced, not
   // copied; nullptr for linear.
   void setCoverageCurve(const uint8_t *curve);
-  void noStroke();
 
   Rect bounds() const override { return bounds_; }
   int bandExtents(Rect *out, int capacity) const override;
@@ -160,31 +205,48 @@ class PathItem : public VectorItem {
 
  private:
   struct Edge {
-    float x0, y0, x1, y1;  // y0 <= y1 for fills; original order for strokes
-    int8_t dir;            // +1 down, -1 up (fills)
-    float dxdy = 0;        // fills: x step per row, precomputed
+    float x0, y0, x1, y1;  // y0 <= y1
+    int8_t dir;            // +1 down, -1 up
+    float dxdy;            // x step per row
   };
   // A flattened segment in local coordinates.
   struct Segment {
     float x0, y0, x1, y1;
-    bool stroked;  // false: the implicit closing edge of a fill
+    uint8_t flags;
   };
+  static constexpr uint8_t kStroked = 1;     // part of the outline (not the implicit closing edge of a fill)
+  static constexpr uint8_t kStartsPath = 2;  // first segment of a subpath
+  static constexpr uint8_t kCloses = 4;      // the explicit close() segment
+  // A paint resolved for screen space: gradient parameters and color tables.
+  struct PaintState {
+    Paint paint;
+    std::unique_ptr<uint32_t[]> lut;  // 256 x RGB888, then 256 x byte-swapped RGB565
+    float g0 = 0, gx = 0, gy = 0;     // linear: t = g0 + gx * x + gy * y
+    float cx = 0, cy = 0, invR = 0;   // radial: t = |p - c| / r
+    void set(const Paint &p);
+    void resolve(const Transform &t);  // gradient geometry -> screen space
+  };
+
   void flatten();   // path -> local segments
   void rebuild();   // local segments + transform -> screen edges and bounds
-  void renderFill(const Span &s) const;
-  void renderStroke(const Span &s) const;
+  void buildStroke(const float *pts, int n, bool closed);
+  void addPolygon(const float *xy, int n);  // to strokeEdges_, normalized orientation
+  void renderEdges(const Span &s, const PsramVector<Edge> &edges, const PaintState &paint, bool evenOdd) const;
+  static void pushEdge(PsramVector<Edge> &out, float x0, float y0, float x1, float y1);
 
   const Path *path_ = nullptr;
   Transform transform_;
   PsramVector<Segment> segments_;
   float flattenScale_ = 0;  // scale the segments were flattened for (0: stale)
-  uint32_t fill_ = 0xFFFFFF, stroke_ = 0xFFFFFF;
-  uint8_t fillAlpha_ = 255, strokeAlpha_ = 255;
+  PaintState fill_, stroke_;
+  FillRule fillRule_ = FillRule::NonZero;
   const uint8_t *curve_ = nullptr;
   bool hasFill_ = true, hasStroke_ = false;
-  float strokeHalf_ = 0;
+  float strokeWidth_ = 0, miterLimit_ = 4;
+  Cap cap_ = Cap::Round;
+  Join join_ = Join::Round;
   PsramVector<Edge> fillEdges_;    // closed outlines, sorted by y0
-  PsramVector<Edge> strokeEdges_;  // polylines as drawn
+  PsramVector<Edge> strokeEdges_;  // stroke outline polygons, sorted by y0
   Rect bounds_;
 };
 

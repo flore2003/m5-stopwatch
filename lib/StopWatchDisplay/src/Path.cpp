@@ -174,6 +174,90 @@ void ShapeItem::set(const Shape &s) {
 
 // ---- PathItem
 
+// ---- Paint
+
+Paint Paint::linear(float x0, float y0, float x1, float y1, std::initializer_list<ColorStop> stops, uint8_t alpha) {
+  Paint p(stops.size() ? stops.begin()->color : 0xFFFFFF, alpha);
+  p.kind = Linear;
+  p.x0 = x0, p.y0 = y0, p.x1 = x1, p.y1 = y1;
+  for (const ColorStop &st : stops) {
+    if (p.stopCount < kMaxStops) p.stops[p.stopCount++] = st;
+  }
+  return p;
+}
+
+Paint Paint::radial(float cx, float cy, float r, std::initializer_list<ColorStop> stops, uint8_t alpha) {
+  Paint p = linear(cx, cy, cx, cy, stops, alpha);
+  p.kind = Radial;
+  p.r = r;
+  return p;
+}
+
+bool Paint::operator==(const Paint &o) const {
+  if (kind != o.kind || alpha != o.alpha) return false;
+  if (kind == Solid) return color == o.color;
+  if (x0 != o.x0 || y0 != o.y0 || x1 != o.x1 || y1 != o.y1 || r != o.r || stopCount != o.stopCount) return false;
+  for (int i = 0; i < stopCount; i++) {
+    if (stops[i].offset != o.stops[i].offset || stops[i].color != o.stops[i].color) return false;
+  }
+  return true;
+}
+
+namespace {
+
+inline uint16_t pack565(uint32_t rgb) {
+  return swap16(uint16_t(((rgb >> 8) & 0xF800) | ((rgb >> 5) & 0x07E0) | ((rgb >> 3) & 0x1F)));
+}
+
+}  // namespace
+
+void PathItem::PaintState::set(const Paint &p) {
+  paint = p;
+  if (p.kind == Paint::Solid || p.stopCount == 0) {
+    lut.reset();
+    return;
+  }
+  if (!lut) lut.reset(new uint32_t[512]);
+  // 256 interpolated colors (RGB888), then the same as panel pixels.
+  for (int i = 0; i < 256; i++) {
+    float t = i / 255.0f;
+    const ColorStop *a = &p.stops[0], *b = a;
+    for (int k = 0; k < p.stopCount; k++) {
+      if (p.stops[k].offset <= t) a = &p.stops[k];
+      if (p.stops[k].offset >= t) {
+        b = &p.stops[k];
+        break;
+      }
+      b = &p.stops[k];
+    }
+    float span = b->offset - a->offset, f = span > 0 ? constrain((t - a->offset) / span, 0.0f, 1.0f) : 0;
+    uint32_t rgb = 0;
+    for (int sh = 0; sh <= 16; sh += 8) {
+      float ca = a->color >> sh & 0xFF, cb = b->color >> sh & 0xFF;
+      rgb |= uint32_t(ca + (cb - ca) * f + 0.5f) << sh;
+    }
+    lut[i] = rgb;
+    lut[256 + i] = pack565(rgb);
+  }
+}
+
+void PathItem::PaintState::resolve(const Transform &t) {
+  if (paint.kind == Paint::Linear) {
+    float ax, ay, bx, by;
+    t.apply(paint.x0, paint.y0, ax, ay);
+    t.apply(paint.x1, paint.y1, bx, by);
+    float dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+    gx = len2 > 0 ? dx / len2 : 0, gy = len2 > 0 ? dy / len2 : 0;
+    g0 = -(ax * gx + ay * gy);
+  } else if (paint.kind == Paint::Radial) {
+    t.apply(paint.x0, paint.y0, cx, cy);
+    float r = paint.r * t.maxScale();  // circles stay circles under uniform scale
+    invR = r > 0 ? 1 / r : 0;
+  }
+}
+
+// ---- PathItem
+
 void PathItem::setPath(const Path &path) {
   invalidateArea();
   path_ = &path;
@@ -190,18 +274,20 @@ void PathItem::setTransform(const Transform &t) {
   invalidateArea();
 }
 
-void PathItem::setFill(uint32_t color, uint8_t alpha) {
-  if (hasFill_ && fill_ == color && fillAlpha_ == alpha) return;
+void PathItem::setFill(const Paint &paint) {
+  if (hasFill_ && fill_.paint == paint) return;
   invalidateArea();
   bool geometry = !hasFill_;
-  fill_ = color, fillAlpha_ = alpha, hasFill_ = true;
-  if (geometry) rebuild();  // a color change alone keeps the edges
+  fill_.set(paint);
+  fill_.resolve(transform_);
+  hasFill_ = true;
+  if (geometry) rebuild();  // a paint change alone keeps the edges
   invalidateArea();
 }
 
-void PathItem::setCoverageCurve(const uint8_t *curve) {
-  if (curve == curve_) return;
-  curve_ = curve;
+void PathItem::setFillRule(FillRule rule) {
+  if (rule == fillRule_) return;
+  fillRule_ = rule;
   invalidateArea();
 }
 
@@ -213,10 +299,13 @@ void PathItem::noFill() {
   invalidateArea();
 }
 
-void PathItem::setStroke(float width, uint32_t color, uint8_t alpha) {
+void PathItem::setStroke(float width, const Paint &paint, Cap cap, Join join, float miterLimit) {
+  bool geometry = !hasStroke_ || strokeWidth_ != width || cap_ != cap || join_ != join || miterLimit_ != miterLimit;
+  if (!geometry && stroke_.paint == paint) return;
   invalidateArea();
-  bool geometry = !hasStroke_ || strokeHalf_ != width / 2;
-  strokeHalf_ = width / 2, stroke_ = color, strokeAlpha_ = alpha, hasStroke_ = width > 0;
+  stroke_.set(paint);
+  stroke_.resolve(transform_);
+  strokeWidth_ = width, cap_ = cap, join_ = join, miterLimit_ = miterLimit, hasStroke_ = width > 0;
   if (geometry) rebuild();
   invalidateArea();
 }
@@ -226,6 +315,12 @@ void PathItem::noStroke() {
   invalidateArea();
   hasStroke_ = false;
   rebuild();
+  invalidateArea();
+}
+
+void PathItem::setCoverageCurve(const uint8_t *curve) {
+  if (curve == curve_) return;
+  curve_ = curve;
   invalidateArea();
 }
 
@@ -240,13 +335,14 @@ void PathItem::flatten() {
   const float tol = kFlatness / flattenScale_;
 
   float startX = 0, startY = 0, curX = 0, curY = 0;
-  bool open = false;
-  auto emit = [&](float x0, float y0, float x1, float y1, bool stroked) {
-    segments_.push_back({x0, y0, x1, y1, stroked});
+  bool open = false, first = false;
+  auto emit = [&](float x0, float y0, float x1, float y1, uint8_t flags) {
+    if (first) flags |= kStartsPath, first = false;
+    segments_.push_back({x0, y0, x1, y1, flags});
   };
   auto closeFill = [&]() {
     // Fills are implicitly closed (as in SVG); strokes only on close().
-    if (open && (curX != startX || curY != startY)) emit(curX, curY, startX, startY, false);
+    if (open && (curX != startX || curY != startY)) emit(curX, curY, startX, startY, 0);
   };
   size_t p = 0;
   for (Path::Verb v : verbs) {
@@ -255,10 +351,10 @@ void PathItem::flatten() {
         closeFill();
         startX = curX = pts[p], startY = curY = pts[p + 1];
         p += 2;
-        open = true;
+        open = true, first = true;
         break;
       case Path::Line:
-        emit(curX, curY, pts[p], pts[p + 1], true);
+        emit(curX, curY, pts[p], pts[p + 1], kStroked);
         curX = pts[p], curY = pts[p + 1];
         p += 2;
         break;
@@ -270,7 +366,7 @@ void PathItem::flatten() {
         for (int i = 1; i <= n; i++) {
           float t = float(i) / n, u = 1 - t;
           float nx = u * u * curX + 2 * u * t * cx + t * t * x, ny = u * u * curY + 2 * u * t * cy + t * t * y;
-          emit(px, py, nx, ny, true);
+          emit(px, py, nx, ny, kStroked);
           px = nx, py = ny;
         }
         curX = x, curY = y;
@@ -288,7 +384,7 @@ void PathItem::flatten() {
           float t = float(i) / n, u = 1 - t;
           float a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
           float nx = a * curX + b * c1x + c * c2x + d * x, ny = a * curY + b * c1y + c * c2y + d * y;
-          emit(px, py, nx, ny, true);
+          emit(px, py, nx, ny, kStroked);
           px = nx, py = ny;
         }
         curX = x, curY = y;
@@ -296,13 +392,118 @@ void PathItem::flatten() {
         break;
       }
       case Path::Close:
-        if (curX != startX || curY != startY) emit(curX, curY, startX, startY, true);
+        if (curX != startX || curY != startY) emit(curX, curY, startX, startY, kStroked | kCloses);
+        else if (!segments_.empty()) segments_.back().flags |= kCloses;
         curX = startX, curY = startY;
         open = false;
         break;
     }
   }
   closeFill();
+}
+
+void PathItem::pushEdge(PsramVector<Edge> &out, float x0, float y0, float x1, float y1) {
+  if (y0 == y1) return;
+  if (y0 < y1) out.push_back({x0, y0, x1, y1, 1, (x1 - x0) / (y1 - y0)});
+  else out.push_back({x1, y1, x0, y0, -1, (x0 - x1) / (y0 - y1)});
+}
+
+// Adds a stroke piece as a closed polygon. All pieces get the same
+// orientation, so where they overlap their windings add up instead of
+// cancelling, and the nonzero fill gives their union.
+void PathItem::addPolygon(const float *xy, int n) {
+  float area = 0;
+  for (int i = 0; i < n; i++) {
+    int j = (i + 1) % n;
+    area += xy[2 * i] * xy[2 * j + 1] - xy[2 * j] * xy[2 * i + 1];
+  }
+  for (int i = 0; i < n; i++) {
+    int a = area >= 0 ? i : n - 1 - i, b = area >= 0 ? (i + 1) % n : (2 * n - 2 - i) % n;
+    pushEdge(strokeEdges_, xy[2 * a], xy[2 * a + 1], xy[2 * b], xy[2 * b + 1]);
+  }
+}
+
+// Stroke outline for one flattened polyline in screen space: a quad per
+// segment, joins between segments, caps at open ends.
+void PathItem::buildStroke(const float *p, int n, bool closed) {
+  const float h = strokeWidth_ * transform_.maxScale() / 2;
+  if (h <= 0 || n < 2) return;
+  // Arc around (cx, cy) from angle a0 to a1 (radians, shorter way), as a fan.
+  auto arcFan = [&](float cx, float cy, float a0, float a1) {
+    float d = a1 - a0;
+    while (d > PI) d -= 2 * PI;
+    while (d < -PI) d += 2 * PI;
+    int steps = constrain(int(ceilf(fabsf(d) * sqrtf(h) * 1.2f)), 1, 32);
+    float poly[2 * 34];
+    int k = 0;
+    poly[k++] = cx, poly[k++] = cy;
+    for (int i = 0; i <= steps; i++) {
+      float a = a0 + d * i / steps;
+      poly[k++] = cx + cosf(a) * h, poly[k++] = cy + sinf(a) * h;
+    }
+    addPolygon(poly, k / 2);
+  };
+  auto disc = [&](float cx, float cy) {
+    arcFan(cx, cy, 0, PI * 0.999f);
+    arcFan(cx, cy, PI, 2 * PI * 0.9995f);
+  };
+
+  const int segs = closed ? n : n - 1;
+  for (int i = 0; i < segs; i++) {
+    const float *a = p + 2 * i, *b = p + 2 * ((i + 1) % n);
+    float dx = b[0] - a[0], dy = b[1] - a[1], len = sqrtf(dx * dx + dy * dy);
+    if (len < 1e-4f) continue;
+    float nx = -dy / len * h, ny = dx / len * h;
+    float quad[8] = {a[0] + nx, a[1] + ny, b[0] + nx, b[1] + ny, b[0] - nx, b[1] - ny, a[0] - nx, a[1] - ny};
+    addPolygon(quad, 4);
+  }
+
+  // Joins at interior vertices (all vertices of a closed polyline).
+  for (int i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) {
+    const float *pv = p + 2 * ((i + n - 1) % n), *v = p + 2 * i, *nv = p + 2 * ((i + 1) % n);
+    float ax = v[0] - pv[0], ay = v[1] - pv[1], bx = nv[0] - v[0], by = nv[1] - v[1];
+    float la = sqrtf(ax * ax + ay * ay), lb = sqrtf(bx * bx + by * by);
+    if (la < 1e-4f || lb < 1e-4f) continue;
+    ax /= la, ay /= la, bx /= lb, by /= lb;
+    float cross = ax * by - ay * bx, dot = ax * bx + ay * by;
+    if (fabsf(cross) < 1e-6f && dot > 0) continue;  // straight on
+    // The outer side of the turn is where the two offset edges open a gap.
+    float side = cross > 0 ? -1 : 1;
+    float nax = -ay * side, nay = ax * side, nbx = -by * side, nby = bx * side;
+    float angle = acosf(constrain(dot, -1.0f, 1.0f));
+    Join join = join_;
+    if (h * angle < 0.5f) join = Join::Bevel;  // tiny gap: a bevel is indistinguishable
+    if (join == Join::Miter && sqrtf(2 / max(1 + dot, 1e-6f)) > miterLimit_) join = Join::Bevel;
+    if (join == Join::Round) {
+      arcFan(v[0], v[1], atan2f(nay, nax), atan2f(nby, nbx));
+    } else if (join == Join::Miter) {
+      float k = h / (1 + dot);
+      float poly[8] = {v[0], v[1], v[0] + nax * h, v[1] + nay * h, v[0] + (nax + nbx) * k, v[1] + (nay + nby) * k,
+                       v[0] + nbx * h, v[1] + nby * h};
+      addPolygon(poly, 4);
+    } else {
+      float tri[6] = {v[0], v[1], v[0] + nax * h, v[1] + nay * h, v[0] + nbx * h, v[1] + nby * h};
+      addPolygon(tri, 3);
+    }
+  }
+
+  // Caps at the ends of an open polyline.
+  if (!closed && cap_ != Cap::Butt) {
+    for (int end = 0; end < 2; end++) {
+      const float *e = end ? p + 2 * (n - 1) : p, *in = end ? p + 2 * (n - 2) : p + 2;
+      float dx = e[0] - in[0], dy = e[1] - in[1], len = sqrtf(dx * dx + dy * dy);
+      if (len < 1e-4f) continue;
+      dx /= len, dy /= len;  // pointing out of the line
+      if (cap_ == Cap::Round) {
+        disc(e[0], e[1]);
+      } else {
+        float nx = -dy * h, ny = dx * h, ox = dx * h, oy = dy * h;
+        float quad[8] = {e[0] + nx, e[1] + ny, e[0] + nx + ox, e[1] + ny + oy,
+                         e[0] - nx + ox, e[1] - ny + oy, e[0] - nx, e[1] - ny};
+        addPolygon(quad, 4);
+      }
+    }
+  }
 }
 
 // Transform the local segments into screen-space edges. Re-flattens first
@@ -314,47 +515,65 @@ void PathItem::rebuild() {
   if (!path_) return;
   float scale = transform_.maxScale();
   if (flattenScale_ == 0 || scale > flattenScale_ * 1.25f || scale < flattenScale_ * 0.5f) flatten();
+  fill_.resolve(transform_);
+  stroke_.resolve(transform_);
 
-  float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+  std::vector<float> poly;  // current stroke polyline, screen space
+  bool polyClosed = false;
+  auto flushStroke = [&]() {
+    if (poly.size() >= 4) buildStroke(poly.data(), int(poly.size() / 2), polyClosed);
+    poly.clear();
+    polyClosed = false;
+  };
   for (const Segment &sg : segments_) {
     float x0, y0, x1, y1;
     transform_.apply(sg.x0, sg.y0, x0, y0);
     transform_.apply(sg.x1, sg.y1, x1, y1);
-    minX = min(minX, min(x0, x1)), maxX = max(maxX, max(x0, x1));
-    minY = min(minY, min(y0, y1)), maxY = max(maxY, max(y0, y1));
-    if (hasStroke_ && sg.stroked) strokeEdges_.push_back({x0, y0, x1, y1, 0});
-    if (hasFill_ && y0 != y1) {
-      if (y0 < y1) fillEdges_.push_back({x0, y0, x1, y1, 1, (x1 - x0) / (y1 - y0)});
-      else fillEdges_.push_back({x1, y1, x0, y0, -1, (x0 - x1) / (y0 - y1)});
+    if (hasFill_) pushEdge(fillEdges_, x0, y0, x1, y1);
+    if (!hasStroke_ || !(sg.flags & kStroked)) continue;
+    if (sg.flags & kStartsPath) flushStroke();
+    if (poly.empty()) poly.insert(poly.end(), {x0, y0});
+    if (sg.flags & kCloses) {
+      polyClosed = true;  // the closing point equals the first: don't repeat it
+      if (x1 != poly[0] || y1 != poly[1]) poly.insert(poly.end(), {x1, y1});
+      flushStroke();
+    } else {
+      poly.insert(poly.end(), {x1, y1});
     }
   }
-  std::sort(fillEdges_.begin(), fillEdges_.end(), [](const Edge &a, const Edge &b) { return a.y0 < b.y0; });
+  flushStroke();
+
+  auto byTop = [](const Edge &a, const Edge &b) { return a.y0 < b.y0; };
+  std::sort(fillEdges_.begin(), fillEdges_.end(), byTop);
+  std::sort(strokeEdges_.begin(), strokeEdges_.end(), byTop);
+  float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+  for (const auto *edges : {&fillEdges_, &strokeEdges_}) {
+    for (const Edge &e : *edges) {
+      minX = min(minX, min(e.x0, e.x1)), maxX = max(maxX, max(e.x0, e.x1));
+      minY = min(minY, e.y0), maxY = max(maxY, e.y1);
+    }
+  }
   if (minX > maxX) return;
-  float m = hasStroke_ ? strokeHalf_ + 1 : 1;
-  bounds_ = {int(floorf(minX - m)), int(floorf(minY - m)), int(ceilf(maxX + m)) + 1, int(ceilf(maxY + m)) + 1};
+  bounds_ = {int(floorf(minX)) - 1, int(floorf(minY)) - 1, int(ceilf(maxX)) + 2, int(ceilf(maxY)) + 2};
 }
 
 int PathItem::bandExtents(Rect *out, int capacity) const {
   if (bounds_.empty()) return 0;
-  // Per band, the x-range of the edges' parts that reach it: a fill lies
-  // between its edges, and strokes are widened by their half width.
-  const float m = (hasStroke_ ? strokeHalf_ : 0) + 1.5f;
+  // Per band, the x-range of the edges' parts that reach it: fills and stroke
+  // outlines both lie between their edges.
+  const float m = 1.5f;
   int n = 0;
   for (int band = max(0, bounds_.y0) / kBandRows; band * kBandRows < bounds_.y1 && band < kBands && n < capacity;
        band++) {
     float by0 = band * kBandRows - m, by1 = (band + 1) * kBandRows + m, lo = 1e9f, hi = -1e9f;
-    auto take = [&](const Edge &e) {
-      float ey0 = min(e.y0, e.y1), ey1 = max(e.y0, e.y1);
-      if (ey1 < by0 || ey0 > by1) return;
-      float xa = e.x0, xb = e.x1;
-      if (e.y1 != e.y0) {
-        float t0 = constrain((by0 - e.y0) / (e.y1 - e.y0), 0.0f, 1.0f), t1 = constrain((by1 - e.y0) / (e.y1 - e.y0), 0.0f, 1.0f);
-        xa = e.x0 + (e.x1 - e.x0) * t0, xb = e.x0 + (e.x1 - e.x0) * t1;
+    for (const auto *edges : {&fillEdges_, &strokeEdges_}) {
+      for (const Edge &e : *edges) {
+        if (e.y1 < by0 || e.y0 > by1) continue;
+        float t0 = max(by0, e.y0), t1 = min(by1, e.y1);
+        float xa = e.x0 + (t0 - e.y0) * e.dxdy, xb = e.x0 + (t1 - e.y0) * e.dxdy;
+        lo = min(lo, min(xa, xb)), hi = max(hi, max(xa, xb));
       }
-      lo = min(lo, min(xa, xb)), hi = max(hi, max(xa, xb));
-    };
-    for (const Edge &e : fillEdges_) take(e);
-    for (const Edge &e : strokeEdges_) take(e);
+    }
     if (lo > hi) continue;
     out[n++] = {int(floorf(lo - m)), max(bounds_.y0, band * kBandRows), int(ceilf(hi + m)) + 1,
                 min(bounds_.y1, (band + 1) * kBandRows)};
@@ -363,8 +582,8 @@ int PathItem::bandExtents(Rect *out, int capacity) const {
 }
 
 void PathItem::render(const Span &s) const {
-  if (hasFill_) renderFill(s);
-  if (hasStroke_) renderStroke(s);
+  if (hasFill_) renderEdges(s, fillEdges_, fill_, fillRule_ == FillRule::EvenOdd);
+  if (hasStroke_) renderEdges(s, strokeEdges_, stroke_, false);
 }
 
 namespace {
@@ -374,9 +593,9 @@ namespace {
 float gAccum[kWidth + 2];
 
 // Adds one edge's signed area to the accumulator for the row band
-// [rowTop, rowTop + 1), with x already relative to the span start (offset
-// xOff) and the accumulator width w. Coverage of a pixel is then the running
-// sum. (The method used by font-rs and stb_truetype.) Widens [lo, hi) to the
+// [rowTop, rowTop + 1), with x already relative to the span start and the
+// accumulator width w. Coverage of a pixel is then the running sum.
+// (The method used by font-rs and stb_truetype.) Widens [lo, hi) to the
 // columns this row's piece of the edge touches. Hot: no divisions and no
 // floorf (x is clamped to >= 0, where a cast is a floor).
 inline void accumulateEdge(float x0, float y0, float y1, float dxdy, int8_t dir, float rowTop, int w, int &touchLo,
@@ -421,11 +640,15 @@ inline void accumulateEdge(float x0, float y0, float y1, float dxdy, int8_t dir,
 
 }  // namespace
 
-void PathItem::renderFill(const Span &s) const {
+// Fills the area enclosed by `edges` with `paint`: area coverage per pixel
+// from the accumulated edge contributions, then nonzero (|winding| capped at
+// 1) or even-odd (winding folded into 0..1).
+void PathItem::renderEdges(const Span &s, const PsramVector<Edge> &edges, const PaintState &ps, bool evenOdd) const {
   Rect b = bounds_.intersect(s.rect());
-  if (b.empty() || fillEdges_.empty()) return;
-  const uint16_t solid =
-      swap16(uint16_t(((fill_ >> 8) & 0xF800) | ((fill_ >> 5) & 0x07E0) | ((fill_ >> 3) & 0x1F)));
+  if (b.empty() || edges.empty()) return;
+  const Paint &paint = ps.paint;
+  const bool gradient = ps.lut != nullptr;
+  const uint16_t solid = pack565(paint.color);
   const int w = b.x1 - b.x0;
   for (int y = b.y0; y < b.y1; y++) {
     const float top = y;
@@ -433,7 +656,7 @@ void PathItem::renderFill(const Span &s) const {
     // entries; coverage between them comes from the running sum.
     int lo = w + 2, hi = 0;
     bool any = false;
-    for (const Edge &e : fillEdges_) {
+    for (const Edge &e : edges) {
       if (e.y0 >= top + 1) break;  // sorted by y0
       if (e.y1 <= top) continue;
       if (!any) {
@@ -443,58 +666,35 @@ void PathItem::renderFill(const Span &s) const {
       accumulateEdge(e.x0 - b.x0, e.y0, e.y1, e.dxdy, e.dir, top, w, lo, hi);
     }
     if (!any || lo >= hi) continue;
-    // Coverage is the running sum; past the rightmost touched column it's
-    // back to 0 (every edge's contribution has been summed by then).
     uint16_t *row = s.dst + (y - s.y) * s.w + (b.x0 - s.x);
-    float acc = 0;
-    for (int x = lo; x < min(hi, w); x++) {
-      acc += gAccum[x];
-      uint32_t a = uint32_t(min(fabsf(acc), 1.0f) * 255 + 0.5f);
-      if (curve_) a = curve_[a];
-      a = (a * fillAlpha_ + 127) / 255;
-      if (a >= 255) row[x] = solid;
-      else if (a) row[x] = blend565(row[x], fill_, a);
-    }
-  }
-}
-
-void PathItem::renderStroke(const Span &s) const {
-  Rect b = bounds_.intersect(s.rect());
-  if (b.empty() || strokeEdges_.empty()) return;
-  const float r = strokeHalf_, in2 = max(r - 0.5f, 0.0f) * max(r - 0.5f, 0.0f), out2 = (r + 0.5f) * (r + 0.5f);
-  const uint16_t solid =
-      swap16(uint16_t(((stroke_ >> 8) & 0xF800) | ((stroke_ >> 5) & 0x07E0) | ((stroke_ >> 3) & 0x1F)));
-  for (int y = b.y0; y < b.y1; y++) {
     const float py = y + 0.5f;
-    // Segments near this row, and the x-range they can affect.
-    const Edge *near[64];
-    int n = 0;
-    float lo = 1e9f, hi = -1e9f;
-    for (const Edge &e : strokeEdges_) {
-      if (min(e.y0, e.y1) - r - 1 > py || max(e.y0, e.y1) + r + 1 < py) continue;
-      if (n < 64) near[n++] = &e;
-      lo = min(lo, min(e.x0, e.x1)), hi = max(hi, max(e.x0, e.x1));
-    }
-    if (!n) continue;
-    int xa = max(b.x0, int(floorf(lo - r - 1))), xb = min(b.x1, int(ceilf(hi + r + 1)) + 1);
-    uint16_t *row = s.dst + (y - s.y) * s.w - s.x;
-    for (int x = xa; x < xb; x++) {
-      float px = x + 0.5f, best = 1e9f;
-      for (int i = 0; i < n; i++) {
-        const Edge &e = *near[i];
-        float dx = e.x1 - e.x0, dy = e.y1 - e.y0, ex = px - e.x0, ey = py - e.y0;
-        float len2 = dx * dx + dy * dy;
-        float t = len2 > 0 ? constrain((ex * dx + ey * dy) / len2, 0.0f, 1.0f) : 0;
-        float qx = ex - t * dx, qy = ey - t * dy;
-        best = min(best, qx * qx + qy * qy);
+    // Linear gradients step by gx per pixel; radial ones need a distance.
+    float t = ps.g0 + ps.gx * (b.x0 + lo + 0.5f) + ps.gy * py;
+    float acc = 0;
+    for (int x = lo; x < min(hi, w); x++, t += ps.gx) {
+      acc += gAccum[x];
+      float cov = fabsf(acc);
+      if (evenOdd) {
+        cov = fmodf(cov, 2.0f);
+        if (cov > 1) cov = 2 - cov;
+      } else if (cov > 1) {
+        cov = 1;
       }
-      if (best >= out2) continue;
-      if (best <= in2) {
-        row[x] = strokeAlpha_ == 255 ? solid : blend565(row[x], stroke_, strokeAlpha_);
-      } else {
-        uint32_t a = uint32_t(constrain(r + 0.5f - sqrtf(best), 0.0f, 1.0f) * strokeAlpha_ + 0.5f);
-        if (a) row[x] = blend565(row[x], stroke_, a);
+      uint32_t a = uint32_t(cov * 255 + 0.5f);
+      if (curve_) a = curve_[a];
+      a = (a * paint.alpha + 127) / 255;
+      if (!a) continue;
+      if (!gradient) {
+        row[x] = a >= 255 ? solid : blend565(row[x], paint.color, a);
+        continue;
       }
+      float tt = t;
+      if (paint.kind == Paint::Radial) {
+        float dx = b.x0 + x + 0.5f - ps.cx, dy = py - ps.cy;
+        tt = sqrtf(dx * dx + dy * dy) * ps.invR;
+      }
+      int i = tt <= 0 ? 0 : tt >= 1 ? 255 : int(tt * 255 + 0.5f);
+      row[x] = a >= 255 ? uint16_t(ps.lut[256 + i]) : blend565(row[x], ps.lut[i], a);
     }
   }
 }

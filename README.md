@@ -79,8 +79,10 @@ Vector graphics (`Vector.h`, `Path.h`, `Text.h`):
   `ImageLayer` (PSRAM raster cache: paint shapes/text into it once).
 - `Path` (SVG-style moveTo/lineTo/quadTo/cubicTo/close, rect, roundRect, circle, arc, pie)
   and `Transform` (translate/rotate/scale, `then()`); `PathItem` fills (exact area
-  coverage, nonzero) and strokes (round caps/joins). Curves are flattened once in local
-  coordinates; a new transform only moves the points.
+  coverage, nonzero or even-odd) and strokes (turned into outline polygons with butt/
+  round/square caps and miter/round/bevel joins, filled the same way). `Paint`: solid,
+  linear or radial gradients (up to 6 stops, in local coordinates, pad spread). Curves
+  are flattened once in local coordinates; a new transform only moves the points.
 - `TextItem`: live text from glyph outlines (any size, color, rotation); `setText()` only
   redraws glyphs that changed; `setTabularNumbers()` for counters. Small sizes: no
   hinting; instead a coverage gamma (default 2.0, chosen by eye) and optional light
@@ -143,7 +145,8 @@ What runs where:
   second). Both 60 fps, 0 torn.
 - `sketches/idle_test`: static scene, a square follows your finger; shows idling.
 - `sketches/watch`: analog watch face (vector dial, path hands, sweeping seconds, RTC + TZ).
-- `sketches/text_test`: live text stress test (counter, rotating text, size ladder).
+- `sketches/text_test`: small-text quality comparison (plain vs tuned columns).
+- `sketches/vector_test`: fill rules, caps, joins and gradients on one sheet.
 - `sketches/tear_test`: tearing test pattern; `sketches/scan_probe`: scan timing probe.
 - Dead ends kept for reference: alternating screen halves (one half shows a refresh late,
   so things tear where they meet) and a scan model without the 2.95 ms blanking (patches
