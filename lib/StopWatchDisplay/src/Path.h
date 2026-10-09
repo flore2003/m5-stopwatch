@@ -15,11 +15,38 @@
 // nearest segment, with round caps and joins.
 #pragma once
 
+#include <esp_heap_caps.h>
+
+#include <memory>
+#include <new>
 #include <vector>
 
 #include "Vector.h"
 
 namespace swd {
+
+// Puts path geometry (commands, flattened segments, edges) in PSRAM: text
+// alone can need a few KB per glyph, and internal RAM is needed for DMA.
+template <typename T>
+struct PsramAllocator {
+  using value_type = T;
+  PsramAllocator() = default;
+  template <typename U>
+  PsramAllocator(const PsramAllocator<U> &) {}
+  T *allocate(size_t n) {
+    void *p = heap_caps_malloc(n * sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) p = malloc(n * sizeof(T));  // no PSRAM: fall back to internal
+    if (!p) throw std::bad_alloc();
+    return static_cast<T *>(p);
+  }
+  void deallocate(T *p, size_t) { heap_caps_free(p); }
+  template <typename U>
+  bool operator==(const PsramAllocator<U> &) const { return true; }
+  template <typename U>
+  bool operator!=(const PsramAllocator<U> &) const { return false; }
+};
+template <typename T>
+using PsramVector = std::vector<T, PsramAllocator<T>>;
 
 // 2D affine transform, as in SVG: x' = a x + c y + e, y' = b x + d y + f.
 struct Transform {
@@ -69,13 +96,13 @@ class Path {
   bool empty() const { return verbs_.empty(); }
 
   enum Verb : uint8_t { Move, Line, Quad, Cubic, Close };
-  const std::vector<Verb> &verbs() const { return verbs_; }
-  const std::vector<float> &points() const { return points_; }  // x, y pairs
+  const PsramVector<Verb> &verbs() const { return verbs_; }
+  const PsramVector<float> &points() const { return points_; }  // x, y pairs
 
  private:
   void arcSegments(float cx, float cy, float r, float startDeg, float endDeg, bool connect);
-  std::vector<Verb> verbs_;
-  std::vector<float> points_;
+  PsramVector<Verb> verbs_;
+  PsramVector<float> points_;
 };
 
 class VectorLayer;
@@ -121,6 +148,10 @@ class PathItem : public VectorItem {
   void setFill(uint32_t color, uint8_t alpha = 255);
   void noFill();
   void setStroke(float width, uint32_t color, uint8_t alpha = 255);
+  // Optional 256-entry curve applied to fill edge coverage (0..255 -> 0..255),
+  // e.g. a gamma that strengthens thin light-on-dark text. Referenced, not
+  // copied; nullptr for linear.
+  void setCoverageCurve(const uint8_t *curve);
   void noStroke();
 
   Rect bounds() const override { return bounds_; }
@@ -145,14 +176,15 @@ class PathItem : public VectorItem {
 
   const Path *path_ = nullptr;
   Transform transform_;
-  std::vector<Segment> segments_;
+  PsramVector<Segment> segments_;
   float flattenScale_ = 0;  // scale the segments were flattened for (0: stale)
   uint32_t fill_ = 0xFFFFFF, stroke_ = 0xFFFFFF;
   uint8_t fillAlpha_ = 255, strokeAlpha_ = 255;
+  const uint8_t *curve_ = nullptr;
   bool hasFill_ = true, hasStroke_ = false;
   float strokeHalf_ = 0;
-  std::vector<Edge> fillEdges_;    // closed outlines, sorted by y0
-  std::vector<Edge> strokeEdges_;  // polylines as drawn
+  PsramVector<Edge> fillEdges_;    // closed outlines, sorted by y0
+  PsramVector<Edge> strokeEdges_;  // polylines as drawn
   Rect bounds_;
 };
 

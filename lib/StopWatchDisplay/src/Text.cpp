@@ -76,13 +76,13 @@ void TextItem::setText(const char *utf8) {
 void TextItem::setColor(uint32_t color, uint8_t alpha) {
   if (color_ == color && alpha_ == alpha) return;
   color_ = color, alpha_ = alpha;
-  for (int i = 0; i < count_; i++) items_[i].setFill(color, alpha);
+  for (int i = 0; i < count_; i++) slots_[i]->item.setFill(color, alpha);
   invalidateArea();
 }
 
 void TextItem::invalidateGlyph(int i) {
   Rect r[kBands * 2];
-  invalidateRects(r, items_[i].bandExtents(r, kBands * 2));
+  invalidateRects(r, slots_[i]->item.bandExtents(r, kBands * 2));
 }
 
 void TextItem::setAlign(Align a) {
@@ -97,6 +97,30 @@ void TextItem::setTabularNumbers(bool on) {
   change(&TextItem::relayout);
 }
 
+void TextItem::setGamma(float gamma) {
+  if (gamma == gamma_) return;
+  gamma_ = gamma;
+  for (int i = 0; i < 256; i++) curve_[i] = uint8_t(powf(i / 255.0f, 1 / gamma) * 255 + 0.5f);
+  for (int i = 0; i < count_; i++) slots_[i]->item.setCoverageCurve(gamma == 1 ? nullptr : curve_);
+  invalidateArea();
+}
+
+void TextItem::setSnapping(bool on) {
+  if (snap_ == on) return;
+  snap_ = on;
+  change(&TextItem::relayout);
+}
+
+// With snapping, the baseline lands on a pixel boundary.
+Transform TextItem::glyphTransform() const {
+  Transform t = transform_;
+  if (snapping()) {
+    float baseline = t.d * baselineY_ + t.f;
+    t.f += roundf(baseline) - baseline;
+  }
+  return t;
+}
+
 void TextItem::setBaseline(Baseline b) {
   if (baseline_ == b) return;
   baseline_ = b;
@@ -105,8 +129,11 @@ void TextItem::setBaseline(Baseline b) {
 
 void TextItem::setTransform(const Transform &t) {
   if (t == transform_) return;
+  bool wasSnapping = snapping();
   transform_ = t;
-  change(&TextItem::transform);
+  // The snapped size depends on the vertical scale; relayout if it changed.
+  if (snapping() != wasSnapping || (snapping() && fabsf(t.d) != snapForD_)) change(&TextItem::relayout);
+  else change(&TextItem::transform);
 }
 
 // Lays out the text left to right with the anchor at (0, 0): one path per
@@ -125,9 +152,19 @@ void TextItem::layout(bool force) {
     if (const GlyphData *g = lookup(f, cp, tabular_)) width += g->advance;
   }
   width_ = width;
-  const float s = scale();
+  // Snapping: pick the size whose x-height is a whole number of pixels.
+  float s = scale();
+  if (snapping()) {
+    float d = fabsf(transform_.d);
+    float xh = f.xHeight * s * d;
+    if (xh >= 1) s *= roundf(xh) / xh;
+    snapForD_ = d;
+  }
+  effectiveScale_ = s;
   float pen = align_ == Left ? 0 : align_ == Center ? -width / 2 : -width;
   const float yShift = baseline_ == Middle ? f.capHeight / 2.0f : 0;  // font units, y up
+  baselineY_ = yShift * s;  // local y of the baseline
+  const Transform gt = glyphTransform();
 
   int n = 0;
   for (const char *p = text_; *p && n < kMaxGlyphs;) {
@@ -136,9 +173,10 @@ void TextItem::layout(bool force) {
     if (!g) continue;
     if (g->count) {
       // Same character at the same place: keep it (nothing to redraw).
-      if (force || n >= count_ || codepoints_[n] != cp || pens_[n] != pen) {
+      if (force || n >= count_ || slots_[n]->codepoint != cp || slots_[n]->pen != pen) {
         if (!force && n < count_) invalidateGlyph(n);
-        Path &path = paths_[n];
+        Slot &sl = slot(n);
+        Path &path = sl.path;
         path.clear();
         const int16_t *d = f.data + g->offset, *end = d + g->count;
         auto X = [&](int16_t v) { return (pen + v) * s; };
@@ -152,11 +190,12 @@ void TextItem::layout(bool force) {
             default: path.close(); break;
           }
         }
-        PathItem &item = items_[n];
+        PathItem &item = sl.item;
         item.setFill(color_, alpha_);
-        item.setTransform(transform_);
+        item.setCoverageCurve(gamma_ == 1 ? nullptr : curve_);
+        item.setTransform(gt);
         item.setPath(path);
-        codepoints_[n] = cp, pens_[n] = pen;
+        sl.codepoint = cp, sl.pen = pen;
         if (!force) invalidateGlyph(n);
       }
       n++;
@@ -168,14 +207,15 @@ void TextItem::layout(bool force) {
   }
   count_ = n;
   bounds_ = Rect();
-  for (int i = 0; i < count_; i++) bounds_ = bounds_.unite(items_[i].bounds());
+  for (int i = 0; i < count_; i++) bounds_ = bounds_.unite(slots_[i]->item.bounds());
 }
 
 void TextItem::transform() {
   bounds_ = Rect();
+  const Transform gt = glyphTransform();
   for (int i = 0; i < count_; i++) {
-    items_[i].setTransform(transform_);
-    bounds_ = bounds_.unite(items_[i].bounds());
+    slots_[i]->item.setTransform(gt);
+    bounds_ = bounds_.unite(slots_[i]->item.bounds());
   }
 }
 
@@ -184,7 +224,7 @@ int TextItem::bandExtents(Rect *out, int capacity) const {
   Rect merged[kBands];
   for (int i = 0; i < count_; i++) {
     Rect r[kBands * 2];
-    int n = items_[i].bandExtents(r, kBands * 2);
+    int n = slots_[i]->item.bandExtents(r, kBands * 2);
     for (int k = 0; k < n; k++) {
       int band = r[k].y0 / kBandRows;
       if (band >= 0 && band < kBands) merged[band] = merged[band].unite(r[k]);
@@ -200,7 +240,7 @@ int TextItem::bandExtents(Rect *out, int capacity) const {
 void TextItem::render(const Span &s) const {
   Rect sr = s.rect();
   for (int i = 0; i < count_; i++) {
-    if (items_[i].bounds().intersects(sr)) items_[i].render(s);
+    if (slots_[i]->item.bounds().intersects(sr)) slots_[i]->item.render(s);
   }
 }
 

@@ -199,6 +199,12 @@ void PathItem::setFill(uint32_t color, uint8_t alpha) {
   invalidateArea();
 }
 
+void PathItem::setCoverageCurve(const uint8_t *curve) {
+  if (curve == curve_) return;
+  curve_ = curve;
+  invalidateArea();
+}
+
 void PathItem::noFill() {
   if (!hasFill_) return;
   invalidateArea();
@@ -443,8 +449,9 @@ void PathItem::renderFill(const Span &s) const {
     float acc = 0;
     for (int x = lo; x < min(hi, w); x++) {
       acc += gAccum[x];
-      float cov = min(fabsf(acc), 1.0f);
-      uint32_t a = uint32_t(cov * fillAlpha_ + 0.5f);
+      uint32_t a = uint32_t(min(fabsf(acc), 1.0f) * 255 + 0.5f);
+      if (curve_) a = curve_[a];
+      a = (a * fillAlpha_ + 127) / 255;
       if (a >= 255) row[x] = solid;
       else if (a) row[x] = blend565(row[x], fill_, a);
     }

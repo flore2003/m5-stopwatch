@@ -66,6 +66,14 @@ class TextItem : public VectorItem {
   // Equal-width digits (the font's tabular figures, if it has them), so
   // changing numbers don't shift: use for counters and clocks.
   void setTabularNumbers(bool on);
+  // Small-size quality, instead of hinting:
+  // - gamma > 1 strengthens anti-aliased edges (coverage^(1/gamma)), which
+  //   keeps thin light-on-dark stems from washing out; 1 is linear.
+  // - snapping (unrotated text only) scales so the x-height is a whole
+  //   number of pixels and puts the baseline on a pixel boundary, so
+  //   horizontal edges are crisp (like FreeType's "light" hinting).
+  void setGamma(float gamma);
+  void setSnapping(bool on);
   // Where the anchor (aligned point on the baseline) goes; replaces the
   // transform with a translation.
   void setPosition(float x, float y) { setTransform(Transform::translate(x, y)); }
@@ -73,7 +81,7 @@ class TextItem : public VectorItem {
   void setTransform(const Transform &t);
 
   const char *text() const { return text_; }
-  float width() const { return width_ * scale(); }  // advance width in pixels
+  float width() const { return width_ * (effectiveScale_ ? effectiveScale_ : scale()); }  // advance width, px
 
   Rect bounds() const override { return bounds_; }
   int bandExtents(Rect *out, int capacity) const override;
@@ -81,6 +89,8 @@ class TextItem : public VectorItem {
 
  private:
   float scale() const { return font_ ? size_ / font_->unitsPerEm : 0; }
+  bool snapping() const { return snap_ && transform_.b == 0 && transform_.c == 0 && font_ && font_->xHeight > 0; }
+  Transform glyphTransform() const;  // transform_, baseline-snapped if snapping
   // Text, font, size, alignment -> glyph paths. With force, every glyph is
   // rebuilt; otherwise only glyphs whose character or position changed,
   // and only their areas are redrawn.
@@ -98,14 +108,29 @@ class TextItem : public VectorItem {
   Align align_ = Left;
   Baseline baseline_ = Alphabetic;
   bool tabular_ = false;
+  bool snap_ = false;
+  float gamma_ = 1;
+  uint8_t curve_[256];
+  float snapForD_ = 0;  // transform y scale the layout was snapped for
+  float effectiveScale_ = 0;
+  float baselineY_ = 0;  // local y of the baseline
   Transform transform_;
   float width_ = 0;  // font units
 
-  Path paths_[kMaxGlyphs];
-  PathItem items_[kMaxGlyphs];
-  uint32_t codepoints_[kMaxGlyphs] = {};
-  float pens_[kMaxGlyphs] = {};  // glyph origin x in font units
+  // One per visible glyph, allocated as the text needs them (a slot's
+  // PathItem points at its Path, so slots must not move: hence pointers).
+  struct Slot {
+    Path path;
+    PathItem item;
+    uint32_t codepoint = 0;
+    float pen = 0;  // glyph origin x in font units
+  };
+  std::vector<std::unique_ptr<Slot>> slots_;
   int count_ = 0;
+  Slot &slot(int i) {
+    while (int(slots_.size()) <= i) slots_.emplace_back(new Slot());
+    return *slots_[i];
+  }
   Rect bounds_;
 };
 

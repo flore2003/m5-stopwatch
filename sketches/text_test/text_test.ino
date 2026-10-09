@@ -1,8 +1,10 @@
-// Live vector text test for swd::TextItem.
+// Live vector text test for swd::TextItem: small-size quality comparison.
 //
-// A counter that changes every frame (72 px), a line rotating around the
-// center, a size ladder (12-28 px) for legibility, and a title. Serial
-// prints frame timing and per-layer render time.
+// The same words at 10-24 px in two columns: left plain, right tuned
+// (gamma on edge coverage, light vertical snapping). KEY A toggles
+// snapping on the right column, KEY B cycles the right column's gamma. A
+// tabular counter at the top keeps the engine drawing.
+// Serial: 'a' = KEY A, 'b' = KEY B; prints timing.
 #include <M5Unified.h>
 #include <Layers.h>
 #include <Text.h>
@@ -10,70 +12,92 @@
 static swd::Engine engine;
 static swd::SolidLayer background(swd::rgb565(14, 17, 28));
 
+static const float kGammas[] = {1.0f, 1.3f, 1.6f, 2.0f};
+static const int kSizes[] = {10, 12, 14, 16, 20, 24};
+static constexpr int kRows = sizeof(kSizes) / sizeof(kSizes[0]);
+
 class TextLayer : public swd::VectorLayer {
  public:
+  int gammaIdx = 2;
+  bool snap = true;
+
   void begin() {
-    title_.setFont(swd::fonts::InterSemiBold);
-    title_.setSize(26);
-    title_.setAlign(swd::TextItem::Center);
-    title_.setColor(0x8C95A8);
-    title_.setPosition(swd::kCenterX, 92);
-    title_.setText("Live vector text");
-
     counter_.setFont(swd::fonts::InterSemiBold);
-    counter_.setSize(72);
+    counter_.setSize(44);
     counter_.setAlign(swd::TextItem::Center);
-    counter_.setBaseline(swd::TextItem::Middle);
-    counter_.setTabularNumbers(true);  // equal-width digits: no jumping
-    counter_.setPosition(swd::kCenterX, swd::kCenterY - 10);
+    counter_.setTabularNumbers(true);
+    counter_.setPosition(swd::kCenterX, 96);
+    add(counter_);
 
-    orbit_.setFont(swd::fonts::InterRegular);
-    orbit_.setSize(22);
-    orbit_.setAlign(swd::TextItem::Center);
-    orbit_.setColor(0xFF6A2B);
-    orbit_.setText("rotating • 60 fps • any angle");
+    header(plainHead_, "plain", swd::kCenterX - 12, swd::TextItem::Right);
+    header(tunedHead_, "tuned", swd::kCenterX + 12, swd::TextItem::Left);
+    // Baselines at fractional y on purpose, as text often lands in real
+    // layouts.
+    float y = 168;
+    for (int i = 0; i < kRows; i++) {
+      y += kSizes[i] + 9.4f;
+      char label[24];
+      snprintf(label, sizeof(label), "%d Hamburg", kSizes[i]);
+      for (int side = 0; side < 2; side++) {
+        swd::TextItem &t = rows_[i][side];
+        t.setFont(swd::fonts::InterRegular);
+        t.setSize(kSizes[i]);
+        t.setColor(0xE4E7EE);
+        t.setAlign(side ? swd::TextItem::Left : swd::TextItem::Right);
+        t.setPosition(swd::kCenterX + (side ? 12 : -12), y);
+        t.setText(label);
+        add(t);
+      }
+    }
+    status_.setFont(swd::fonts::InterRegular);
+    status_.setSize(15);
+    status_.setAlign(swd::TextItem::Center);
+    status_.setColor(0xFF6A2B);
+    status_.setPosition(swd::kCenterX, 410);
+    add(status_);
+    apply();
+  }
 
-    static const int kSizes[] = {12, 16, 20, 28};
-    for (int i = 0; i < 4; i++) {
-      char text[24];
-      snprintf(text, sizeof(text), "%d px Quick brown fox", kSizes[i]);
-      ladder_[i].setFont(swd::fonts::InterRegular);
-      ladder_[i].setSize(kSizes[i]);
-      ladder_[i].setAlign(swd::TextItem::Center);
-      ladder_[i].setColor(0xD8DCE6);
-      ladder_[i].setPosition(swd::kCenterX, 300 + i * 30 + kSizes[i] / 2);
-      ladder_[i].setText(text);
+  // Settings -> right column, and the status line.
+  void apply() {
+    for (int i = 0; i < kRows; i++) {
+      rows_[i][1].setGamma(kGammas[gammaIdx]);
+      rows_[i][1].setSnapping(snap);
     }
-    for (swd::VectorItem *it : std::initializer_list<swd::VectorItem *>{&title_, &counter_, &orbit_, &ladder_[0],
-                                                                        &ladder_[1], &ladder_[2], &ladder_[3]}) {
-      add(*it);
-    }
+    char label[48];
+    snprintf(label, sizeof(label), "right: gamma %.1f · snap %s", kGammas[gammaIdx], snap ? "on" : "off");
+    status_.setText(label);
   }
 
   bool animating() const override { return true; }
-  bool counting = true;
-  uint32_t counterUs = 0, orbitUs = 0;
-  void toggleOrbit() { orbit_.setVisible(!orbit_.visible()); }
 
   void update(const swd::FrameInfo &f) override {
-    char text[16];
-    snprintf(text, sizeof(text), "%05u", f.frame);
-    uint32_t t0 = micros();
-    if (counting) counter_.setText(text);
-    counterUs = max(counterUs, micros() - t0);
-    // Orbit text: rotated around the screen center, 150 px out.
-    float deg = f.time * 30;
-    t0 = micros();
-    orbit_.setTransform(swd::Transform::translate(0, -150)
-                            .then(swd::Transform::rotate(deg))
-                            .then(swd::Transform::translate(swd::kCenterX, swd::kCenterY)));
-    orbitUs = max(orbitUs, micros() - t0);
+    char label[16];
+    snprintf(label, sizeof(label), "%05u", f.frame);
+    counter_.setText(label);
   }
 
  private:
-  swd::TextItem title_, counter_, orbit_, ladder_[4];
+  void header(swd::TextItem &t, const char *label, float x, swd::TextItem::Align align) {
+    t.setFont(swd::fonts::InterSemiBold);
+    t.setSize(14);
+    t.setColor(0x8C95A8);
+    t.setAlign(align);
+    t.setPosition(x, 160);
+    t.setText(label);
+    add(t);
+  }
+
+  swd::TextItem counter_, plainHead_, tunedHead_, status_, rows_[kRows][2];
 };
 static TextLayer text;
+
+static void onEvent(const swd::Event &e) {
+  if (e.type != swd::Event::ButtonDown) return;
+  if (e.button == swd::Event::A) text.snap = !text.snap;
+  else text.gammaIdx = (text.gammaIdx + 1) % 4;
+  text.apply();
+}
 
 void setup() {
   Serial.begin(115200);
@@ -85,15 +109,17 @@ void setup() {
   text.begin();
   engine.add(background);
   engine.add(text);
-  Serial.println("ready");
+  engine.onEvent(onEvent);
+  Serial.printf("ready, free internal=%u (dma %u) psram=%u\n", heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                heap_caps_get_free_size(MALLOC_CAP_DMA), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
 void loop() {
   static uint32_t windowStart = millis(), frames = 0, worstUs = 0, tornStart = 0, worstUpdate = 0;
   while (Serial.available()) {
     char ch = Serial.read();
-    if (ch == 'o') text.toggleOrbit();
-    if (ch == 'c') text.counting = !text.counting;
+    if (ch == 'a') engine.post(swd::Event::buttonDown(swd::Event::A));
+    if (ch == 'b') engine.post(swd::Event::buttonDown(swd::Event::B));
   }
   engine.frame();
   frames++;
@@ -102,13 +128,10 @@ void loop() {
 
   uint32_t elapsed = millis() - windowStart;
   if (elapsed >= 2000) {
-    auto &st = engine.renderer().lastStats();
     uint32_t torn = engine.renderer().tornCount();
-    Serial.printf("fps=%.1f worst_update_us=%u worst_draw_us=%u torn=%u skipped=%u regions=%u | last: render=%u wait_render=%u | text layer us=%u\n",
+    Serial.printf("fps=%.1f worst_update_us=%u worst_draw_us=%u torn=%u skipped=%u | gamma=%.1f snap=%d\n",
                   frames * 1000.0f / elapsed, worstUpdate, worstUs, torn - tornStart, engine.skipped(),
-                  engine.lastFrame().regions, st.render, st.waitRender, engine.layerRenderUs(1));
-    Serial.printf("  worst update parts: counter setText=%u us, orbit setTransform=%u us\n", text.counterUs, text.orbitUs);
-    text.counterUs = text.orbitUs = 0;
+                  kGammas[text.gammaIdx], text.snap);
     windowStart = millis();
     frames = worstUs = worstUpdate = 0;
     tornStart = torn;
