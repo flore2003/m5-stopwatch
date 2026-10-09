@@ -139,6 +139,10 @@ Bus and frame times:
   and slow writes need chasing.
 
 What runs where:
+- `sketches/focus`: **the demo.** A ring timer: drag around the rim to set 1–60 min
+  (haptic click per minute), tap the center (or KEY A) to start/pause, KEY B rewinds.
+  Shows partial redraws (60 arc segments + a tip), gradients, round/butt caps, live
+  tabular text, transparency, haptics, and idling while nothing moves.
 - `sketches/anim_bg`: full-screen gradient at 60 fps (engine).
 - `sketches/ball`: ball over the gradient (engine). KEY A: gradient every refresh (full
   frames) or every second refresh (engine draws 30 full frames + 30 ball patches per

@@ -81,8 +81,8 @@ void TextItem::setColor(uint32_t color, uint8_t alpha) {
 }
 
 void TextItem::invalidateGlyph(int i) {
-  Rect r[kBands * 2];
-  invalidateRects(r, slots_[i]->item.bandExtents(r, kBands * 2));
+  Rect r[kBands * 4];
+  invalidateRects(r, slots_[i]->item.bandExtents(r, kBands * 4));
 }
 
 void TextItem::setAlign(Align a) {
@@ -223,8 +223,8 @@ void TextItem::transform() {
 int TextItem::bandExtents(Rect *out, int capacity) const {
   Rect merged[kBands];
   for (int i = 0; i < count_; i++) {
-    Rect r[kBands * 2];
-    int n = slots_[i]->item.bandExtents(r, kBands * 2);
+    Rect r[kBands * 4];
+    int n = slots_[i]->item.bandExtents(r, kBands * 4);
     for (int k = 0; k < n; k++) {
       int band = r[k].y0 / kBandRows;
       if (band >= 0 && band < kBands) merged[band] = merged[band].unite(r[k]);

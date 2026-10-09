@@ -29,6 +29,7 @@
 #pragma once
 
 #include <functional>
+#include <initializer_list>
 
 #include "StopWatchDisplay.h"
 
@@ -100,6 +101,24 @@ struct FrameInfo {
 
 class Engine;
 
+// The vibration motor. Calls only queue a pattern; the engine's input task
+// plays it, so motor writes (I2C to the power chip) never stall a frame or
+// collide with touch reads. Needs Engine with input enabled (the default).
+class Haptics {
+ public:
+  static constexpr int kMaxSteps = 8;
+  // A short tick, like a detent.
+  static void click(uint8_t strength = 150, uint16_t ms = 14) { pattern({ms}, strength); }
+  // Alternating on/off times in ms, starting with on. Replaces whatever is
+  // playing.
+  static void pattern(std::initializer_list<uint16_t> steps, uint8_t strength = 170);
+
+ private:
+  friend class Engine;
+  static void begin();
+  static void service();  // input task, every ~10 ms
+};
+
 class Layer {
  public:
   virtual ~Layer() = default;
@@ -144,6 +163,9 @@ class Engine {
     bool input = true;
     // Longest frame() sleeps while idle, so loop() still runs now and then.
     uint32_t idleTimeoutMs = 1000;
+    // Display brightness, applied once the first frame is drawn (the panel
+    // stays dark until then, so a slow first frame never shows half done).
+    uint8_t brightness = 255;
   };
 
   // Since begin().

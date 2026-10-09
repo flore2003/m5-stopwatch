@@ -220,7 +220,7 @@ class PathItem : public VectorItem {
   // A paint resolved for screen space: gradient parameters and color tables.
   struct PaintState {
     Paint paint;
-    std::unique_ptr<uint32_t[]> lut;  // 256 x RGB888, then 256 x byte-swapped RGB565
+    std::shared_ptr<const uint32_t> lut;  // 256 x RGB888, then 256 x byte-swapped RGB565; shared by equal paints
     float g0 = 0, gx = 0, gy = 0;     // linear: t = g0 + gx * x + gy * y
     float cx = 0, cy = 0, invR = 0;   // radial: t = |p - c| / r
     void set(const Paint &p);
@@ -247,6 +247,12 @@ class PathItem : public VectorItem {
   Join join_ = Join::Round;
   PsramVector<Edge> fillEdges_;    // closed outlines, sorted by y0
   PsramVector<Edge> strokeEdges_;  // stroke outline polygons, sorted by y0
+  // Bounding box of each stroke piece, so a stroked ring or arc dirties only
+  // its own band intervals, not everything between its sides.
+  struct Box {
+    float x0, y0, x1, y1;
+  };
+  PsramVector<Box> strokeBoxes_;
   Rect bounds_;
 };
 
@@ -270,7 +276,7 @@ class ShapeItem : public VectorItem {
 // referenced, not owned.
 class VectorLayer : public Layer {
  public:
-  static constexpr int kMaxItems = 64;
+  static constexpr int kMaxItems = 128;
   bool add(VectorItem &item);
 
   Rect bounds() const override;

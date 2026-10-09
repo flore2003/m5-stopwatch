@@ -13,6 +13,59 @@ Rect Rect::intersect(const Rect &o) const {
   return r.empty() ? Rect() : r;
 }
 
+// ---- Haptics
+
+namespace {
+
+struct HapticPattern {
+  uint8_t strength, count;
+  uint16_t steps[Haptics::kMaxSteps];
+};
+QueueHandle_t hapticQueue = nullptr;
+
+}  // namespace
+
+void Haptics::begin() {
+  if (!hapticQueue) hapticQueue = xQueueCreate(1, sizeof(HapticPattern));
+}
+
+void Haptics::pattern(std::initializer_list<uint16_t> steps, uint8_t strength) {
+  if (!hapticQueue) return;
+  HapticPattern p = {strength, 0, {}};
+  for (uint16_t ms : steps) {
+    if (p.count < kMaxSteps) p.steps[p.count++] = ms;
+  }
+  xQueueOverwrite(hapticQueue, &p);
+}
+
+void Haptics::service() {
+  static HapticPattern playing = {};
+  static int step = -1;
+  static uint32_t stepEnd = 0;
+  static bool motorOn = false;
+  auto motor = [&](bool on) {
+    if (on == motorOn) return;  // the write goes over I2C: only on changes
+    motorOn = on;
+    M5.Power.setVibration(on ? playing.strength : 0);
+  };
+  HapticPattern next;
+  if (hapticQueue && xQueueReceive(hapticQueue, &next, 0) == pdTRUE) {
+    playing = next;
+    step = 0;
+    stepEnd = millis() + playing.steps[0];
+    motor(true);
+  }
+  while (step >= 0 && int32_t(millis() - stepEnd) >= 0) {
+    if (++step >= playing.count) {
+      step = -1;
+      motor(false);
+      break;
+    }
+    stepEnd += playing.steps[step];
+    motor(step % 2 == 0);  // even steps on, odd steps off
+  }
+}
+
 // ---- Layer
 
 void Layer::invalidate(const Rect &r) {
@@ -31,9 +84,12 @@ bool Engine::begin() { return begin(Config()); }
 
 bool Engine::begin(const Config &cfg) {
   cfg_ = cfg;
-  setupDisplay();
+  // Dark until the first full frame is on the panel: it takes longer than
+  // a refresh, so it would otherwise show up half drawn.
+  setupDisplay(0);
   Vsync::begin();
   events_ = xQueueCreate(32, sizeof(Event));
+  Haptics::begin();
   if (!events_ || !renderer_.begin(renderSpan, this, cfg_.renderer)) return false;
   // Input polling shares the render core at low priority, so its I2C reads
   // never delay the start of a frame on this core.
@@ -137,7 +193,8 @@ void Engine::inputTask(void *self) {
     }
     lastX = t.x;
     lastY = t.y;
-    vTaskDelay(pdMS_TO_TICKS(10));
+    Haptics::service();
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 
@@ -211,7 +268,11 @@ void Engine::frame() {
     last_.regions = n;
     last_.torn = renderer_.lastStats().torn;
     last_.slackUs = renderer_.lastStats().slackUs;
-    counters_.draws++;
+    if (counters_.draws++ == 0) {
+      Vsync::waitNext();  // let the panel show the finished frame first
+      Vsync::waitNext();
+      M5.Display.setBrightness(cfg_.brightness);
+    }
   }
   info_.frame++;
 }

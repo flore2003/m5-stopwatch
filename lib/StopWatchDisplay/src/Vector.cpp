@@ -234,8 +234,8 @@ void Shape::render(const Span &sp) const {
 // ---- ShapeLayer
 
 void ShapeLayer::invalidateShape(const Shape &s) {
-  Rect r[kBands * 2];
-  int n = s.bandExtents(r, kBands * 2);
+  Rect r[kBands * 4];
+  int n = s.bandExtents(r, kBands * 4);
   for (int i = 0; i < n; i++) invalidate(r[i]);
 }
 

@@ -145,8 +145,8 @@ bool VectorLayer::add(VectorItem &item) {
 }
 
 void VectorLayer::invalidateItem(const VectorItem &item) {
-  Rect r[kBands * 2];
-  int n = item.bandExtents(r, kBands * 2);
+  Rect r[kBands * 4];
+  int n = item.bandExtents(r, kBands * 4);
   for (int i = 0; i < n; i++) invalidate(r[i]);
 }
 
@@ -167,6 +167,11 @@ void VectorLayer::render(const Span &s) const {
 }
 
 void ShapeItem::set(const Shape &s) {
+  const Shape &c = shape_;
+  if (c.kind == s.kind && c.x0 == s.x0 && c.y0 == s.y0 && c.x1 == s.x1 && c.y1 == s.y1 && c.r == s.r && c.w == s.w &&
+      c.color == s.color && c.alpha == s.alpha) {
+    return;  // unchanged: nothing to redraw
+  }
   invalidateArea();
   shape_ = s;
   invalidateArea();
@@ -217,7 +222,24 @@ void PathItem::PaintState::set(const Paint &p) {
     lut.reset();
     return;
   }
-  if (!lut) lut.reset(new uint32_t[512]);
+  // Items with equal gradients (e.g. 60 arc segments) share one table.
+  static struct {
+    Paint paint;
+    std::weak_ptr<const uint32_t> lut;
+  } cache[8];
+  static int next = 0;
+  for (auto &c : cache) {
+    if (c.paint == p) {
+      if (auto shared = c.lut.lock()) {
+        lut = shared;
+        return;
+      }
+    }
+  }
+  auto *table = static_cast<uint32_t *>(heap_caps_malloc(512 * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!table) table = static_cast<uint32_t *>(malloc(512 * sizeof(uint32_t)));
+  if (!table) return;
+  std::shared_ptr<uint32_t> owned(table, [](uint32_t *t) { heap_caps_free(t); });
   // 256 interpolated colors (RGB888), then the same as panel pixels.
   for (int i = 0; i < 256; i++) {
     float t = i / 255.0f;
@@ -236,9 +258,12 @@ void PathItem::PaintState::set(const Paint &p) {
       float ca = a->color >> sh & 0xFF, cb = b->color >> sh & 0xFF;
       rgb |= uint32_t(ca + (cb - ca) * f + 0.5f) << sh;
     }
-    lut[i] = rgb;
-    lut[256 + i] = pack565(rgb);
+    table[i] = rgb;
+    table[256 + i] = pack565(rgb);
   }
+  lut = owned;
+  cache[next] = {p, owned};
+  next = (next + 1) % 8;
 }
 
 void PathItem::PaintState::resolve(const Transform &t) {
@@ -412,6 +437,12 @@ void PathItem::pushEdge(PsramVector<Edge> &out, float x0, float y0, float x1, fl
 // orientation, so where they overlap their windings add up instead of
 // cancelling, and the nonzero fill gives their union.
 void PathItem::addPolygon(const float *xy, int n) {
+  Box box = {xy[0], xy[1], xy[0], xy[1]};
+  for (int i = 1; i < n; i++) {
+    box.x0 = min(box.x0, xy[2 * i]), box.x1 = max(box.x1, xy[2 * i]);
+    box.y0 = min(box.y0, xy[2 * i + 1]), box.y1 = max(box.y1, xy[2 * i + 1]);
+  }
+  strokeBoxes_.push_back(box);
   float area = 0;
   for (int i = 0; i < n; i++) {
     int j = (i + 1) % n;
@@ -511,6 +542,7 @@ void PathItem::buildStroke(const float *p, int n, bool closed) {
 void PathItem::rebuild() {
   fillEdges_.clear();
   strokeEdges_.clear();
+  strokeBoxes_.clear();
   bounds_ = Rect();
   if (!path_) return;
   float scale = transform_.maxScale();
@@ -559,24 +591,40 @@ void PathItem::rebuild() {
 
 int PathItem::bandExtents(Rect *out, int capacity) const {
   if (bounds_.empty()) return 0;
-  // Per band, the x-range of the edges' parts that reach it: fills and stroke
-  // outlines both lie between their edges.
   const float m = 1.5f;
   int n = 0;
   for (int band = max(0, bounds_.y0) / kBandRows; band * kBandRows < bounds_.y1 && band < kBands && n < capacity;
        band++) {
-    float by0 = band * kBandRows - m, by1 = (band + 1) * kBandRows + m, lo = 1e9f, hi = -1e9f;
-    for (const auto *edges : {&fillEdges_, &strokeEdges_}) {
-      for (const Edge &e : *edges) {
-        if (e.y1 < by0 || e.y0 > by1) continue;
-        float t0 = max(by0, e.y0), t1 = min(by1, e.y1);
-        float xa = e.x0 + (t0 - e.y0) * e.dxdy, xb = e.x0 + (t1 - e.y0) * e.dxdy;
-        lo = min(lo, min(xa, xb)), hi = max(hi, max(xa, xb));
-      }
+    const float by0 = band * kBandRows - m, by1 = (band + 1) * kBandRows + m;
+    const int ry0 = max(bounds_.y0, band * kBandRows), ry1 = min(bounds_.y1, (band + 1) * kBandRows);
+    // Fill: one interval per band, between its leftmost and rightmost edge
+    // (the area between edges is inside the shape).
+    float lo = 1e9f, hi = -1e9f;
+    for (const Edge &e : fillEdges_) {
+      if (e.y1 < by0 || e.y0 > by1) continue;
+      float t0 = max(by0, e.y0), t1 = min(by1, e.y1);
+      float xa = e.x0 + (t0 - e.y0) * e.dxdy, xb = e.x0 + (t1 - e.y0) * e.dxdy;
+      lo = min(lo, min(xa, xb)), hi = max(hi, max(xa, xb));
     }
-    if (lo > hi) continue;
-    out[n++] = {int(floorf(lo - m)), max(bounds_.y0, band * kBandRows), int(ceilf(hi + m)) + 1,
-                min(bounds_.y1, (band + 1) * kBandRows)};
+    if (lo <= hi) out[n++] = {int(floorf(lo - m)), ry0, int(ceilf(hi + m)) + 1, ry1};
+    // Stroke: the union of its pieces' boxes, as separate intervals, so the
+    // inside of a stroked ring stays clean. Boxes are mostly in path order,
+    // so neighbors merge as they come.
+    int first = n;
+    for (const Box &bx : strokeBoxes_) {
+      if (bx.y1 < by0 || bx.y0 > by1) continue;
+      int x0 = int(floorf(bx.x0 - m)), x1 = int(ceilf(bx.x1 + m)) + 1;
+      bool merged = false;
+      for (int k = first; k < n; k++) {
+        if (x0 <= out[k].x1 + 8 && out[k].x0 <= x1 + 8) {
+          out[k].x0 = min(out[k].x0, x0), out[k].x1 = max(out[k].x1, x1);
+          merged = true;
+          break;
+        }
+      }
+      if (!merged && n < capacity) out[n++] = {x0, ry0, x1, ry1};
+      else if (!merged) out[n - 1].x0 = min(out[n - 1].x0, x0), out[n - 1].x1 = max(out[n - 1].x1, x1);
+    }
   }
   return n;
 }
@@ -694,7 +742,8 @@ void PathItem::renderEdges(const Span &s, const PsramVector<Edge> &edges, const 
         tt = sqrtf(dx * dx + dy * dy) * ps.invR;
       }
       int i = tt <= 0 ? 0 : tt >= 1 ? 255 : int(tt * 255 + 0.5f);
-      row[x] = a >= 255 ? uint16_t(ps.lut[256 + i]) : blend565(row[x], ps.lut[i], a);
+      const uint32_t *lut = ps.lut.get();
+      row[x] = a >= 255 ? uint16_t(lut[256 + i]) : blend565(row[x], lut[i], a);
     }
   }
 }
