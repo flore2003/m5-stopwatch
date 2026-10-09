@@ -43,20 +43,38 @@ Keep the default partition scheme (`app3M_fat9M_16MB`, same as init()) so upload
 replace the app and leave the init() profile storage (`nvs`, `ffat`) alone.
 
 ```bash
-arduino-cli compile -b m5stack:esp32:m5stack_stopwatch --library lib/StopWatchDisplay sketches/anim_bg
-arduino-cli upload -b m5stack:esp32:m5stack_stopwatch -p /dev/cu.usbmodem2101 sketches/anim_bg
-arduino-cli monitor -p /dev/cu.usbmodem2101 -c baudrate=115200
+arduino-cli compile -b m5stack:esp32:m5stack_stopwatch --library lib/StopWatchDisplay sketches/ball
+arduino-cli upload -b m5stack:esp32:m5stack_stopwatch -p "$(ls /dev/cu.usbmodem* | head -1)" sketches/ball
+arduino-cli monitor -p "$(ls /dev/cu.usbmodem* | head -1)" -c baudrate=115200
 ```
 
-`lib/StopWatchDisplay` is the shared display library (namespace `swd`): `setupDisplay()`
-(geometry fix), `Vsync` (TE refresh counter), `FramePacer` (start frames every Nth
-refresh), `StripRenderer` (render callback + two-core SRAM strips + DMA, circle-only
-spans, `drawFrame`/`drawRows`/`drawRect`, per-draw `lastStats()`), and `Overlay`
-(keyed sprite composited inside a render callback). `sketches/anim_bg` is the reference
-user. `sketches/tap_color` and `sketches/push_bench` predate it and are standalone.
+The port name depends on the USB socket (`/dev/cu.usbmodem101`, `...2101`, …).
+
+## The display library (`lib/StopWatchDisplay`, namespace `swd`)
+
+Engine level (`Engine.h`, `Layers.h`), for apps:
+- `Engine`: `begin()` after `M5.begin()`, `add(layer)` back to front, `frame()` in `loop()`.
+  Each frame waits for the next refresh, calls `update()` on every layer and redraws only
+  what the layers invalidated (one full frame if that's most of the screen).
+- `Layer`: override `update(FrameInfo)` (main core: change state, `invalidate(rect)` what
+  changes; `FrameInfo::dt` counts whole refreshes) and `render(Span)` (render core: only
+  read state). A layer that animates more slowly just invalidates less often; areas
+  redrawn for other layers show it unchanged.
+- `GradientLayer` (interval N = update every N refreshes), `SpriteLayer` (M5GFX canvas with
+  a transparent key color; `moveTo()` invalidates old and new area), `StatsLayer` (fps and
+  tear count pill).
+
+Low level (`StopWatchDisplay.h`): `setupDisplay()` (geometry fix), `Vsync` (TE refresh
+counter, measured period), `FramePacer`, `StripRenderer` (render callback, two-core SRAM
+strips DMA'd straight to the panel, circle-only spans, scan chasing, per-draw stats with a
+tear check, `drawCount()`/`tornCount()`), `Overlay`.
+
+Don't draw with `M5.Display` while the engine runs: M5GFX's framebuffer no longer matches
+the screen and its next flush would overwrite it.
 
 Display gotcha (from ESPtember): right after `M5.begin()`, set the panel to 468×466 with
-`offset_x = 6`, rotation 0, and never draw rows 466–467, or a black bar appears.
+`offset_x = 6`, rotation 0, and never draw rows 466–467, or a black bar appears
+(`setupDisplay()` / `Engine::begin()` do this).
 
 ## Display timing (measured)
 
@@ -65,27 +83,37 @@ once per refresh. M5GFX enables TE but never reads it. After the TE edge the pan
 for ~2.95 ms, then scans rows top to bottom at ~29.7 µs per row (13.8 ms for 466 rows):
 **row r is scanned at TE + 2.95 ms + r × 29.7 µs.** Period and row time come from
 `sketches/scan_probe` (moves the TE line with command `0x44`); the blanking was tuned by
-eye with `sketches/ball`.
+eye with the ball sketch.
 
-**Tear-free rule:** write each row after the scan has passed it and before it comes round
-again. Everything written in one pass then appears together, exactly one refresh later.
-`swd::StripRenderer` does this by default (`followScan`): each strip waits until the scan
-has passed it.
+**Tear-free rule:** each row must be written entirely before or after the scan passes it,
+and all rows of one update must land in the same refresh. `StripRenderer` chases the scan
+by default (`followScan`): each strip waits until the scan has passed it, so an update
+appears exactly one refresh later. Its tear check measures every strip's DMA window and
+reports `torn`, `slackUs` and the refresh that shows it; `sketches/tear_test` validates it
+(chasing ON / OFF: 0 torn, NO SYNC: ~25% torn, matching what's visible).
 
-Bus speed: a full 468×466 RGB565 frame takes ~22–24 ms over QSPI, so full-screen updates
-top out at 30 fps; ~30 ms per frame is the limit before the next scan overtakes the write
-(a full-frame sprite push from PSRAM, ~31 ms, always tears). Sending only the visible circle
-(84% of pixels) saves ~2.7 ms. Render callbacks must keep up: the sending core waits on the
-renderer at the start of each frame (`lastStats().waitRender`).
+Bus and frame times:
+- M5GFX's StopWatch setup draws into a PSRAM framebuffer and copies its dirty bounding box
+  to the panel on `endWrite()`. Going through it, a full frame cost ~24 ms (two copies).
+  `StripRenderer` bypasses it and DMAs SRAM strips straight to `Panel_AMOLED`: a full frame
+  takes ~9.5 ms unsynced (~105 fps ceiling) and ~16.3 ms when chasing the scan, so the
+  gradient runs full screen at 60 fps.
+- Rendering is now the bottleneck (~7–9 ms per gradient frame on the second core). Keep
+  render callbacks lean (`lastStats().waitRender`).
+- A full frame written fast enough also lands cleanly without chasing (it starts before
+  the scan and stays ahead, showing a refresh earlier with more slack). Partial updates
+  and slow writes need chasing.
 
 What runs where:
-- `sketches/anim_bg`: full-screen animated gradient, 30 fps.
-- `sketches/ball`: ball at 60 fps over the 30 fps gradient. Full frame every second
-  refresh, plus a small patch of the ball's old and new position in between, both chasing
-  the scan. Dead ends: alternating screen halves (one half shows a refresh late, so the ball
-  tears where they meet) and patching without the 2.95 ms blanking (patches land a refresh
-  early: 30 fps look plus tearing).
+- `sketches/anim_bg`: full-screen gradient at 60 fps (engine).
+- `sketches/ball`: ball over the gradient (engine). KEY A: gradient every refresh (full
+  frames) or every second refresh (engine draws 30 full frames + 30 ball patches per
+  second). Both 60 fps, 0 torn.
+- `sketches/tear_test`: tearing test pattern; `sketches/scan_probe`: scan timing probe.
+- Dead ends kept for reference: alternating screen halves (one half shows a refresh late,
+  so things tear where they meet) and a scan model without the 2.95 ms blanking (patches
+  land a refresh early: 30 fps look plus tearing).
 
-M5GFX quirks: `pushImageDMA` returns before the transfer is done and `waitDMA()` doesn't
-wait for it; the time only shows up in `endWrite()`. `Panel_AMOLED::command_list()` sends
-raw panel commands (include `lgfx/v1/panel/Panel_AMOLED.hpp`).
+M5GFX notes: `Panel_AMOLED::command_list()` sends raw panel commands (include
+`lgfx/v1/panel/Panel_AMOLED.hpp`); the real panel is the `_panel` member of
+`M5.Display.getPanel()` (a `Panel_AMOLED_Framebuffer`).
