@@ -1,0 +1,144 @@
+{
+  "artifacts": [
+    {
+      "name": "bootloader",
+      "offset": 0,
+      "path": "bootloader.bin",
+      "sha256": "ed301d66be767b19fb2e80f864af3749ef1df7fe1ba5af8a2d132f12bb3d3ee4",
+      "size_bytes": 22272
+    },
+    {
+      "name": "partition-table",
+      "offset": 32768,
+      "path": "partition-table.bin",
+      "sha256": "ace02503447d0f470692e65fa76002f2d77a92dc81cd3813d8aa66718d716da9",
+      "size_bytes": 3072
+    },
+    {
+      "name": "firmware",
+      "offset": 65536,
+      "path": "firmware.bin",
+      "sha256": "86f7d91cf66f85f37d583af89af0f2bf30130e41fac344d7de89b2a5e31a3a7e",
+      "size_bytes": 2826112
+    }
+  ],
+  "build_id": "v1.2.0",
+  "channel": "stable",
+  "created_at": "2026-10-05T18:15:56Z",
+  "embedded_build": {
+    "compile_date": "Oct  5 2026",
+    "compile_time": "11:11:28",
+    "elf_sha256": "d4f17130062f58927ba51bf440f5f4069c098a7a8dfbd8a16270a47815566b71",
+    "idf_version": "v5.5.4",
+    "project_name": "conference_badge",
+    "project_version": "1.2.0"
+  },
+  "flash": {
+    "erase_all": false,
+    "frequency": "80m",
+    "mode": "dio",
+    "post_flash": {
+      "clock_protocol": 1,
+      "expected_build": "v1.2.0",
+      "fresh_clock_sync_required": true,
+      "radios_off_required": true,
+      "rtc_advancement_required": true,
+      "storage_ready_required": true
+    },
+    "preserve_partitions": [
+      "nvs",
+      "otadata",
+      "app1",
+      "ffat",
+      "coredump"
+    ],
+    "requires_partition_match": true,
+    "write_set": [
+      "bootloader",
+      "partition-table",
+      "firmware"
+    ]
+  },
+  "hardware": {
+    "chip": "esp32s3",
+    "chip_id": 9,
+    "flash_bytes": 16777216,
+    "model": "M5Stack StopWatch",
+    "psram_bytes": 8388608,
+    "psram_mode": "opi"
+  },
+  "limitations": [
+    "This preservation update requires an exact existing partition-sector match; factory layouts use the separate reviewed first-install path.",
+    "Only app0 is updated. OTA boot selection is preserved, so the installed build must be verified after restart.",
+    "A fresh computer-clock sync and verified advancing RTC are required after flashing; the binary contains no provisioning timestamp.",
+    "Captive-portal discovery has known iOS redirect and DNS compatibility gaps; 192.168.4.1 is the manual fallback.",
+    "Profile photos download from avatar.chan.dev only when an attendee saves a recognized account and Wi-Fi is reachable.",
+    "Battery runtime and clock retention after complete battery exhaustion remain unqualified."
+  ],
+  "partition_table": {
+    "layout": [
+      {
+        "flags": 0,
+        "name": "nvs",
+        "offset": 36864,
+        "size_bytes": 20480,
+        "subtype": 2,
+        "type": 1
+      },
+      {
+        "flags": 0,
+        "name": "otadata",
+        "offset": 57344,
+        "size_bytes": 8192,
+        "subtype": 0,
+        "type": 1
+      },
+      {
+        "flags": 0,
+        "name": "app0",
+        "offset": 65536,
+        "size_bytes": 3145728,
+        "subtype": 16,
+        "type": 0
+      },
+      {
+        "flags": 0,
+        "name": "app1",
+        "offset": 3211264,
+        "size_bytes": 3145728,
+        "subtype": 17,
+        "type": 0
+      },
+      {
+        "flags": 0,
+        "name": "ffat",
+        "offset": 6356992,
+        "size_bytes": 10354688,
+        "subtype": 129,
+        "type": 1
+      },
+      {
+        "flags": 0,
+        "name": "coredump",
+        "offset": 16711680,
+        "size_bytes": 65536,
+        "subtype": 3,
+        "type": 1
+      }
+    ],
+    "offset": 32768,
+    "padding_byte": 255,
+    "sector_sha256": "0bcf1787e46f4bf1ce9ad28bd22c2257e715987e913add5008c0265d3feb2fcd",
+    "sector_size": 4096
+  },
+  "schema_version": 1,
+  "source": {
+    "artifact_source_verified": false,
+    "branch": "main",
+    "capture_scope": "packaging_worktree",
+    "commit": "90cdfa86fdcfe099ba9228c8833f1a967858988b",
+    "dirty": false,
+    "note": "Commit, branch and dirty state describe the worktree at packaging time. They do not attest which uncommitted source produced the image; embedded build metadata is reported separately.",
+    "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

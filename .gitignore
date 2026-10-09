@@ -1,0 +1,8 @@
+# Large local-only files: factory flash dump and the offline reference archive
+# (re-creatable from the sources listed in archive/README.md).
+backups/*.bin
+archive/
+
+# Build output and editor/OS clutter
+build/
+.DS_Store

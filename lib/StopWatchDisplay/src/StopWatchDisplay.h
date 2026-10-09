@@ -1,0 +1,153 @@
+// Tear-free rendering for the M5Stack StopWatch (C152) round AMOLED.
+//
+// What we measured on this panel (see the project README):
+// - The CO5300 refreshes at 60 Hz and reports each refresh on its tearing-
+//   effect (TE) pin, GPIO38. M5GFX enables TE but never reads it.
+// - A full 468x466 RGB565 frame takes ~22-24 ms on the QSPI bus, so full-screen
+//   updates top out at 30 fps (every second refresh).
+// - Updates are tear-free when they start on a TE edge and the write stays
+//   ahead of the panel's scan. Pushing a whole frame from PSRAM (~31 ms) is
+//   too slow; rendering into small SRAM strips is fast enough.
+//
+// Pixel format everywhere: RGB565, byte-swapped (as the panel expects). Use
+// swd::rgb565() to build colors.
+#pragma once
+
+#include <M5Unified.h>
+
+namespace swd {
+
+// Corrected panel geometry. Rows 466-467 of the controller are never shown.
+constexpr int kWidth = 468;
+constexpr int kHeight = 466;
+constexpr int kCenterX = kWidth / 2;
+constexpr int kCenterY = kHeight / 2;
+constexpr int kRadius = 233;  // visible circle
+
+constexpr uint16_t swap16(uint16_t v) { return uint16_t(v >> 8 | v << 8); }
+constexpr uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
+  return swap16(uint16_t((r & 0xF8) << 8 | (g & 0xFC) << 3 | b >> 3));
+}
+
+// Applies the panel geometry fix (468x466, offset_x 6, rotation 0). The
+// default config leaves a black bar; this comes from ESPtember. Call right
+// after M5.begin().
+void setupDisplay(uint8_t brightness = 255);
+
+// Counts panel refreshes via an interrupt on the TE pin.
+class Vsync {
+ public:
+  static void begin(int pin = 38);
+  static uint32_t count();
+  // Busy-waits until count() reaches target (wrap-safe). False on timeout,
+  // so a missing TE signal never hangs the caller.
+  static bool waitFor(uint32_t target, uint32_t timeoutUs = 50000);
+  static bool waitNext(uint32_t timeoutUs = 50000) { return waitFor(count() + 1, timeoutUs); }
+};
+
+// Starts frames on every Nth refresh. If a frame runs long, it resyncs to the
+// next refresh instead of trying to catch up (and counts a skip).
+class FramePacer {
+ public:
+  explicit FramePacer(uint8_t refreshesPerFrame = 2) : interval_(refreshesPerFrame) {}
+  void setInterval(uint8_t refreshesPerFrame) { interval_ = refreshesPerFrame; }
+  // Blocks until the next scheduled refresh edge.
+  void wait();
+  uint32_t skipped() const { return skipped_; }
+
+ private:
+  uint8_t interval_;
+  uint32_t next_ = 0;
+  uint32_t skipped_ = 0;
+  bool started_ = false;
+};
+
+// Fills dst with pixels for screen columns [x, x + w) and rows [y, y + rows);
+// dst has a stride of w pixels. x and w are always even. Runs on the render
+// core, so anything it reads must not change while a draw is in progress.
+using RenderFn = void (*)(uint16_t *dst, int x, int y, int w, int rows, void *ctx);
+
+// Renders the screen in horizontal strips: the second core renders strip
+// i + 1 into one SRAM buffer while this core sends strip i from the other.
+class StripRenderer {
+ public:
+  struct Config {
+    int stripRows = 32;
+    // Only send the part of each strip inside the visible circle (~84% of
+    // the pixels for a full frame). Invisible corners keep old content.
+    bool circleOnly = true;
+    UBaseType_t taskPriority = configMAX_PRIORITIES - 2;
+  };
+
+  bool begin(RenderFn fn, void *ctx = nullptr);
+  bool begin(RenderFn fn, void *ctx, const Config &cfg);
+  void setCircleOnly(bool on) { cfg_.circleOnly = on; }  // call between draws
+  bool circleOnly() const { return cfg_.circleOnly; }
+
+  // Render and send a region. Each call blocks until the pixels are on the
+  // panel and returns the time it took in microseconds. Don't wrap these in
+  // your own startWrite()/endWrite(), or the transfer completes later.
+  uint32_t drawFrame() { return drawRect(0, 0, kWidth, kHeight); }
+  uint32_t drawRows(int y0, int y1) { return drawRect(0, y0, kWidth, y1 - y0); }
+  uint32_t drawRect(int x, int y, int w, int h);
+
+  // Timing of the last draw, in microseconds. If waitRender is a large part
+  // of total, the render callback is the bottleneck, not the bus.
+  struct Stats {
+    uint32_t total;       // whole draw, until the pixels are on the panel
+    uint32_t render;      // time spent in the render callback (render core)
+    uint32_t waitRender;  // time this core waited for the render core
+    uint32_t flush;       // time endWrite() waited for the last transfers
+    uint16_t bands;
+  };
+  const Stats &lastStats() const { return stats_; }
+
+ private:
+  struct Job {
+    uint16_t *dst;
+    int16_t x, y, w, rows;
+  };
+  static void taskEntry(void *self);
+  void runJob(const Job &job);
+  bool span(int x, int y, int w, int rows, int &sx, int &sw) const;
+
+  Config cfg_;
+  RenderFn fn_ = nullptr;
+  void *ctx_ = nullptr;
+  uint16_t *buf_[2] = {nullptr, nullptr};
+  TaskHandle_t task_ = nullptr;
+  TaskHandle_t caller_ = nullptr;
+  volatile Job job_ = {};
+  volatile uint32_t renderUs_ = 0;
+  Stats stats_ = {};
+};
+
+// A small sprite composited over rendered pixels. Pixels equal to
+// kTransparent are skipped, so shapes can be any outline.
+class Overlay {
+ public:
+  // Key color in M5GFX's (unswapped) RGB565 form, for drawing into canvas().
+  static constexpr uint16_t kTransparent = 0x0120;  // an unlikely dark green
+
+  bool begin(int w, int h);
+  // Draw with M5GFX into this. Avoid anti-aliased edges: they would blend
+  // into the key color. Only change it between draws.
+  M5Canvas &canvas() { return canvas_; }
+  void clear() { canvas_.fillScreen(kTransparent); }
+  void setPosition(int x, int y) { x_ = x; y_ = y; }
+  void setVisible(bool visible) { visible_ = visible; }
+  int x() const { return x_; }
+  int y() const { return y_; }
+  int width() const { return canvas_.width(); }
+  int height() const { return canvas_.height(); }
+
+  // Call from a RenderFn after drawing the background into dst.
+  void composite(uint16_t *dst, int x, int y, int w, int rows) const;
+
+ private:
+  M5Canvas canvas_;
+  int x_ = 0, y_ = 0;
+  bool visible_ = true;
+};
+
+}  // namespace swd
